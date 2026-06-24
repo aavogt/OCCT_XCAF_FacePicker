@@ -1,5 +1,9 @@
 #include <iostream>
 
+#include <GLFW/glfw3.h>
+
+#include "GlfwOcctWindow.h"
+
 // OCCT Core / Framework Data
 #include <BinXCAFDrivers.hxx>
 #include <TDF_Label.hxx>
@@ -70,82 +74,146 @@ int main(int argc, char *argv[]) {
   Handle(XCAFDoc_ColorTool) colorTool =
       XCAFDoc_DocumentTool::ColorTool(doc->Main());
 
-  // 4. Initialize a visual processing context
-  Handle(Aspect_DisplayConnection) displayConnection =
-      new Aspect_DisplayConnection();
+  // 4. Create a real GLFW/OpenGL window and bind OCCT view to it
+  if (!glfwInit()) {
+    std::cerr << "Error: glfwInit() failed." << std::endl;
+    return 1;
+  }
+
+  glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+
+  Handle(GlfwOcctWindow) occtWindow =
+      new GlfwOcctWindow(1280, 720, "OCCT XCAF Face Picker");
+  if (occtWindow->getGlfwWindow() == nullptr) {
+    std::cerr << "Error: glfwCreateWindow() failed." << std::endl;
+    glfwTerminate();
+    return 1;
+  }
+
+  glfwMakeContextCurrent(occtWindow->getGlfwWindow());
+  glfwSwapInterval(1);
+
   Handle(OpenGl_GraphicDriver) graphicDriver =
-      new OpenGl_GraphicDriver(displayConnection, Standard_False);
+      new OpenGl_GraphicDriver(occtWindow->GetDisplay(), Standard_False);
+
   Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
+  viewer->SetDefaultLights();
+  viewer->SetLightOn();
+
   Handle(AIS_InteractiveContext) context = new AIS_InteractiveContext(viewer);
   Handle(V3d_View) view = viewer->CreateView();
+  view->SetWindow(occtWindow, occtWindow->NativeGlContext());
+  if (!occtWindow->IsMapped()) {
+    occtWindow->Map();
+  }
 
-  // 5. Query Assembly Information and Attach Presentation Overrides
+  // 5. Query Assembly Information and attach presentation
   TDF_LabelSequence freeShapes;
   shapeTool->GetFreeShapes(freeShapes);
   if (freeShapes.IsEmpty()) {
     std::cerr << "Error: Document context yields no free structural components."
               << std::endl;
+    glfwTerminate();
     return 1;
   }
 
-  // Capture the primary topological target node
   TDF_Label rootLabel = freeShapes.First();
   Handle(XCAFPrs_AISObject) xcafPresentation = new XCAFPrs_AISObject(rootLabel);
-
-  // Display presentation and activate Face Sub-Shape Selectors (Mode 4)
   context->Display(xcafPresentation, Standard_True);
   context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
 
-  // Update viewing matrices to encompass bounds of loaded models
   view->FitAll();
+  view->ZFitAll();
   context->UpdateCurrentViewer();
 
-  std::cout << "\n--- Simulating Graphic Pick Event ---" << std::endl;
+  std::cout
+      << "Left click a face to print its XCAF label/color. Press ESC to quit."
+      << std::endl;
 
-  // 6. Visual Selection Simulation Pipeline
-  // Real applications run this under mouse interactions (e.g.
-  // context->SelectDetected()) For offscreen mapping tracking, select
-  // everything in the bounding canvas to test faces
-  context->SelectDetected();
+  bool wasLeftPressed = false;
+  int lastFbWidth = 0;
+  int lastFbHeight = 0;
+  glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
+                         &lastFbHeight);
 
-  // Loop through the selected items
-  for (context->InitSelected(); context->MoreSelected();
-       context->NextSelected()) {
-    Handle(SelectMgr_EntityOwner) owner = context->SelectedOwner();
-    Handle(StdSelect_BRepOwner) brepOwner =
-        Handle(StdSelect_BRepOwner)::DownCast(owner);
+  // 6. Event/render loop
+  while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
+    glfwPollEvents();
 
-    if (!brepOwner.IsNull()) {
-      TopoDS_Shape pickedShape = brepOwner->Shape();
+    if (glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_ESCAPE) ==
+        GLFW_PRESS) {
+      glfwSetWindowShouldClose(occtWindow->getGlfwWindow(), GLFW_TRUE);
+    }
 
-      if (pickedShape.ShapeType() == TopAbs_FACE) {
+    glfwMakeContextCurrent(occtWindow->getGlfwWindow());
+
+    int fbWidth = 0;
+    int fbHeight = 0;
+    glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &fbWidth, &fbHeight);
+    if (fbWidth != lastFbWidth || fbHeight != lastFbHeight) {
+      view->MustBeResized();
+      lastFbWidth = fbWidth;
+      lastFbHeight = fbHeight;
+    }
+
+    double mouseX = 0.0, mouseY = 0.0;
+    glfwGetCursorPos(occtWindow->getGlfwWindow(), &mouseX, &mouseY);
+    context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
+                    Standard_True);
+
+    const bool isLeftPressed =
+        glfwGetMouseButton(occtWindow->getGlfwWindow(),
+                           GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
+    if (isLeftPressed && !wasLeftPressed) {
+      context->SelectDetected();
+
+      for (context->InitSelected(); context->MoreSelected();
+           context->NextSelected()) {
+        Handle(SelectMgr_EntityOwner) owner = context->SelectedOwner();
+        Handle(StdSelect_BRepOwner) brepOwner =
+            Handle(StdSelect_BRepOwner)::DownCast(owner);
+
+        if (brepOwner.IsNull()) {
+          continue;
+        }
+
+        TopoDS_Shape pickedShape = brepOwner->Shape();
+        if (pickedShape.ShapeType() != TopAbs_FACE) {
+          continue;
+        }
+
         TopoDS_Face pickedFace = TopoDS::Face(pickedShape);
-
-        // 7. Directly Check the Per-Face Label Bindings inside XCAF
         TDF_Label targetFaceLabel;
-        if (shapeTool->FindSubShape(rootLabel, pickedFace, targetFaceLabel)) {
-          std::cout << "Detected Sub-Shape Label Reference: ";
-          targetFaceLabel.EntryDump(std::cout);
-          std::cout << std::endl;
+        if (!shapeTool->FindSubShape(rootLabel, pickedFace, targetFaceLabel)) {
+          continue;
+        }
 
-          Quantity_Color exactColor;
-          // Directly queries face label data bypassing hierarchical walking
-          if (colorTool->GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
-                                  exactColor)) {
-            std::cout << "  -> Direct Face Surface Color (RGB): "
-                      << exactColor.Red() << ", " << exactColor.Green() << ", "
-                      << exactColor.Blue() << std::endl;
-          } else {
-            std::cout << "  -> Direct face color attribute missing from this "
-                         "individual face sub-label."
-                      << std::endl;
-          }
+        std::cout << "Detected Sub-Shape Label Reference: ";
+        targetFaceLabel.EntryDump(std::cout);
+        std::cout << std::endl;
+
+        Quantity_Color exactColor;
+        if (colorTool->GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
+                                exactColor)) {
+          std::cout << "  -> Direct Face Surface Color (RGB): "
+                    << exactColor.Red() << ", " << exactColor.Green() << ", "
+                    << exactColor.Blue() << std::endl;
+        } else {
+          std::cout << "  -> Direct face color attribute missing from this "
+                       "individual face sub-label."
+                    << std::endl;
         }
       }
     }
+
+    wasLeftPressed = isLeftPressed;
+
+    view->Redraw();
   }
 
   // Clean up allocated storage bounds before shutdown
   app->Close(doc);
+  glfwTerminate();
   return 0;
 }

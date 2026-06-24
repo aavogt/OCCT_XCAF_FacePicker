@@ -4,11 +4,15 @@ project(OCCT_XCAF_FacePicker CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find Open CASCADE Technology installation
+# Find dependencies
 find_package(OpenCASCADE REQUIRED)
+find_package(glfw3 REQUIRED)
 
 # Define the source files
-set(SOURCE_FILES main.cpp)
+set(SOURCE_FILES
+    main.cpp
+    GlfwOcctWindow.cpp
+)
 
 add_executable(${PROJECT_NAME} ${SOURCE_FILES})
 
@@ -33,4 +37,5 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     TKBinXCAF
     TKOpenGl
     TKDESTEP
+    glfw
 )
