@@ -269,6 +269,5 @@ int main(int argc, char *argv[]) {
 
   // Clean up allocated storage bounds before shutdown
   app->Close(doc);
-  glfwTerminate();
   return 0;
 }
