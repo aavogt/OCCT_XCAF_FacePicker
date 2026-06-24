@@ -179,6 +179,32 @@ int main(int argc, char *argv[]) {
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) xcafPresentation;
 
+  auto applyPresentationStyling =
+      [&](const Handle(XCAFPrs_AISObject) &presentation) {
+        if (presentation.IsNull()) {
+          return;
+        }
+
+        // Important: reuse the object's existing drawer to avoid wiping
+        // XCAF/AIS defaults that affect interaction/selection behavior.
+        Handle(Prs3d_Drawer) drawer = presentation->Attributes();
+        if (drawer.IsNull()) {
+          drawer = new Prs3d_Drawer();
+        }
+        drawer->Link(context->DefaultDrawer());
+
+        // Draw visible face boundaries in shaded mode.
+        drawer->SetFaceBoundaryDraw(Standard_True);
+
+        // Use explicit black boundary lines for better contrast.
+        Handle(Prs3d_LineAspect) faceBoundaryAspect =
+            new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f);
+        drawer->SetFaceBoundaryAspect(faceBoundaryAspect);
+
+        presentation->SetAttributes(drawer);
+        presentation->SynchronizeAspects();
+      };
+
   auto loadModelFromDisk = [&]() -> bool {
     Handle(TDocStd_Document) newDoc;
     app->NewDocument("BinXCAF", newDoc);
@@ -222,6 +248,7 @@ int main(int argc, char *argv[]) {
     const TDF_Label newRootLabel = freeShapes.First();
     Handle(XCAFPrs_AISObject) newPresentation =
         new XCAFPrs_AISObject(newRootLabel);
+    applyPresentationStyling(newPresentation);
 
     Handle(TDocStd_Document) oldDoc = doc;
     Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
