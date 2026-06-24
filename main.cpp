@@ -199,6 +199,7 @@ int main(int argc, char *argv[]) {
       }
       const Standard_Real dx = (Standard_Real)(mouseX - rotateStartX);
       const Standard_Real dy = (Standard_Real)(mouseY - rotateStartY);
+      // Rotate(x,y,...)
       view->Rotate(dx * 0.005, -dy * 0.005, 0.0,
                    wasRightPressed ? Standard_False : Standard_True);
     }
