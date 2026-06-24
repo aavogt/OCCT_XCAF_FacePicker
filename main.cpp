@@ -26,6 +26,7 @@
 #include <STEPCAFControl_Reader.hxx>
 
 // Visualization & Presentation
+#include <AIS_LightSource.hxx>
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
@@ -112,10 +113,10 @@ int main(int argc, char *argv[]) {
   const std::string watchedStepFilePath = NormalizePath(stepPathForOcct);
 
   const std::filesystem::path watchRootPath =
-      stepPathAbsolute.parent_path().empty()
-          ? std::filesystem::current_path()
-          : stepPathAbsolute.parent_path();
-  const std::string watchRootForDmon = watchRootPath.lexically_normal().string();
+      stepPathAbsolute.parent_path().empty() ? std::filesystem::current_path()
+                                             : stepPathAbsolute.parent_path();
+  const std::string watchRootForDmon =
+      watchRootPath.lexically_normal().string();
 
   // 1. Initialize an OCAF/XCAF Application Document Context
   Handle(TDocStd_Application) app = new TDocStd_Application();
@@ -154,6 +155,20 @@ int main(int argc, char *argv[]) {
     occtWindow->Map();
   }
 
+  Handle(AIS_LightSource) sceneLightSource;
+  for (V3d_ListOfLightIterator lightIt(viewer->ActiveLights()); lightIt.More();
+       lightIt.Next()) {
+    const Handle(V3d_Light)& activeLight = lightIt.Value();
+    if (activeLight.IsNull()) {
+      continue;
+    }
+
+    sceneLightSource = new AIS_LightSource(activeLight);
+    sceneLightSource->SetDisplayName(Standard_True);
+    // context->Display(sceneLightSource, Standard_False);
+    break;
+  }
+
   const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
   const Standard_Boolean kApplyTintColor = Standard_False;
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
@@ -163,34 +178,6 @@ int main(int argc, char *argv[]) {
   Handle(XCAFDoc_ColorTool) colorTool;
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) xcafPresentation;
-
-  auto applyPresentationStyling = [&](const Handle(XCAFPrs_AISObject) &presentation) {
-    if (presentation.IsNull()) {
-      return;
-    }
-
-    Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
-    drawer->Link(context->DefaultDrawer());
-
-    // Draw model edges as thin black boundaries while staying in shaded mode.
-    drawer->SetFaceBoundaryDraw(Standard_True);
-    Handle(Prs3d_LineAspect) faceBoundaryAspect =
-        new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f);
-    drawer->SetFaceBoundaryAspect(faceBoundaryAspect);
-
-    // Use a physically-based shading model (shader lighting path similar to F3D style).
-    Handle(Prs3d_ShadingAspect) shadingAspect = drawer->ShadingAspect();
-    if (shadingAspect.IsNull()) {
-      shadingAspect = new Prs3d_ShadingAspect();
-      drawer->SetShadingAspect(shadingAspect);
-    }
-    Handle(Graphic3d_AspectFillArea3d) fillAspect = shadingAspect->Aspect();
-    if (!fillAspect.IsNull()) {
-      fillAspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
-    }
-
-    presentation->SetAttributes(drawer);
-  };
 
   auto loadModelFromDisk = [&]() -> bool {
     Handle(TDocStd_Document) newDoc;
@@ -235,7 +222,6 @@ int main(int argc, char *argv[]) {
     const TDF_Label newRootLabel = freeShapes.First();
     Handle(XCAFPrs_AISObject) newPresentation =
         new XCAFPrs_AISObject(newRootLabel);
-    applyPresentationStyling(xcafPresentation);
 
     Handle(TDocStd_Document) oldDoc = doc;
     Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
@@ -251,11 +237,10 @@ int main(int argc, char *argv[]) {
     }
 
     context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
-    // Keep only face picking active; disable global selection mode that can
-    // capture whole assemblies/edges and break face-click behavior.
-    context->SetSelectionModeActive(xcafPresentation, 1, Standard_False);
+    context->SetSelectionModeActive(xcafPresentation, 0, Standard_False);
     context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
-    context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
+    context->SetTransparency(xcafPresentation, kModelTransparency,
+                             Standard_False);
     if (kApplyTintColor) {
       context->SetColor(xcafPresentation, kTintColor, Standard_False);
     }
@@ -280,8 +265,8 @@ int main(int argc, char *argv[]) {
   ModelWatchContext watchContext{&reloadRequested, watchedStepFilePath};
 
   dmon_init();
-  dmon_watch_id watchId = dmon_watch(watchRootForDmon.c_str(), OnModelFileChanged,
-                                     0, &watchContext);
+  dmon_watch_id watchId = dmon_watch(watchRootForDmon.c_str(),
+                                     OnModelFileChanged, 0, &watchContext);
   if (watchId.id == 0) {
     std::cerr << "Warning: dmon could not watch directory: " << watchRootForDmon
               << std::endl;
@@ -290,7 +275,8 @@ int main(int argc, char *argv[]) {
   std::cout
       << "Left click a face to print its XCAF label/color. Press ESC to quit."
       << std::endl;
-  std::cout << "Watching model file for changes: " << stepPathForOcct << std::endl;
+  std::cout << "Watching model file for changes: " << stepPathForOcct
+            << std::endl;
 
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
@@ -319,7 +305,8 @@ int main(int argc, char *argv[]) {
       if (loadModelFromDisk()) {
         std::cout << "Model reloaded from disk." << std::endl;
       } else {
-        std::cerr << "Model reload failed; keeping previous scene." << std::endl;
+        std::cerr << "Model reload failed; keeping previous scene."
+                  << std::endl;
       }
     }
 
@@ -378,7 +365,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Left click: select/detect face.
-    if (isLeftPressed && !wasLeftPressed && !isRightPressed && !isMiddlePressed) {
+    if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
+        !isMiddlePressed) {
       context->SelectDetected();
 
       for (context->InitSelected(); context->MoreSelected();
