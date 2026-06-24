@@ -24,6 +24,7 @@
 
 // STEP Reader Engine
 #include <STEPCAFControl_Reader.hxx>
+#include <Standard_Failure.hxx>
 
 // Visualization & Presentation
 #include <AIS_LightSource.hxx>
@@ -31,7 +32,8 @@
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfLine.hxx>
-#include <Graphic3d_AspectFillArea3d.hxx>
+#include <Graphic3d_NameOfTextureEnv.hxx>
+#include <Graphic3d_TextureEnv.hxx>
 #include <Graphic3d_TypeOfShadingModel.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -39,6 +41,8 @@
 #include <Prs3d_ShadingAspect.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <V3d_View.hxx>
+#include <V3d_AmbientLight.hxx>
+#include <V3d_DirectionalLight.hxx>
 #include <V3d_Viewer.hxx>
 #include <XCAFPrs_AISObject.hxx>
 
@@ -145,7 +149,24 @@ int main(int argc, char *argv[]) {
       new OpenGl_GraphicDriver(occtWindow->GetDisplay(), Standard_False);
 
   Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
-  viewer->SetDefaultLights();
+  viewer->SetDefaultShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
+
+  // Custom light rig (dimmer than SetDefaultLights()).
+  Handle(V3d_AmbientLight) ambientLight =
+      new V3d_AmbientLight(Quantity_Color(0.20, 0.20, 0.20, Quantity_TOC_RGB));
+  ambientLight->SetIntensity(0.50f);
+
+  Handle(V3d_DirectionalLight) keyLight =
+      new V3d_DirectionalLight(gp_Dir(-0.5, -0.4, -1.0));
+  keyLight->SetIntensity(0.90f);
+
+  Handle(V3d_DirectionalLight) fillLight =
+      new V3d_DirectionalLight(gp_Dir(0.6, 0.3, -1.0));
+  fillLight->SetIntensity(0.70f);
+
+  viewer->AddLight(ambientLight);
+  viewer->AddLight(keyLight);
+  viewer->AddLight(fillLight);
   viewer->SetLightOn();
 
   Handle(AIS_InteractiveContext) context = new AIS_InteractiveContext(viewer);
@@ -153,6 +174,16 @@ int main(int argc, char *argv[]) {
   view->SetWindow(occtWindow, occtWindow->NativeGlContext());
   if (!occtWindow->IsMapped()) {
     occtWindow->Map();
+  }
+
+  try {
+    Handle(Graphic3d_TextureEnv) envTexture =
+        new Graphic3d_TextureEnv(Graphic3d_NOT_ENV_SKY2);
+    view->SetTextureEnv(envTexture);
+    view->SetImageBasedLighting(Standard_True, Standard_False);
+  } catch (const Standard_Failure &failure) {
+    std::cerr << "Warning: could not enable environment/IBL: "
+              << failure.GetMessageString() << std::endl;
   }
 
   Handle(AIS_LightSource) sceneLightSource;
@@ -167,6 +198,18 @@ int main(int argc, char *argv[]) {
     sceneLightSource->SetDisplayName(Standard_True);
     // context->Display(sceneLightSource, Standard_False);
     break;
+  }
+
+  Handle(Prs3d_Drawer) defaultDrawer = context->DefaultDrawer();
+  defaultDrawer->SetFaceBoundaryDraw(Standard_True);
+  defaultDrawer->SetFaceBoundaryAspect(
+      new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f));
+  Handle(Prs3d_ShadingAspect) defaultShadingAspect =
+      defaultDrawer->ShadingAspect();
+  if (!defaultShadingAspect.IsNull() &&
+      !defaultShadingAspect->Aspect().IsNull()) {
+    defaultShadingAspect->Aspect()->SetShadingModel(
+        Graphic3d_TypeOfShadingModel_Pbr);
   }
 
   const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
@@ -185,21 +228,30 @@ int main(int argc, char *argv[]) {
           return;
         }
 
-        // Important: reuse the object's existing drawer to avoid wiping
-        // XCAF/AIS defaults that affect interaction/selection behavior.
+        // Reuse object drawer (do not replace XCAF internals), but ensure it is
+        // linked to context defaults.
         Handle(Prs3d_Drawer) drawer = presentation->Attributes();
         if (drawer.IsNull()) {
           drawer = new Prs3d_Drawer();
         }
         drawer->Link(context->DefaultDrawer());
 
-        // Draw visible face boundaries in shaded mode.
+        // Black edge overlay in shaded mode.
         drawer->SetFaceBoundaryDraw(Standard_True);
+        drawer->SetFaceBoundaryAspect(
+            new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f));
 
-        // Use explicit black boundary lines for better contrast.
-        Handle(Prs3d_LineAspect) faceBoundaryAspect =
-            new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f);
-        drawer->SetFaceBoundaryAspect(faceBoundaryAspect);
+        // Restore PBR shading model per-object (XCAF presentations may have own
+        // aspects that override context defaults).
+        Handle(Prs3d_ShadingAspect) shadingAspect = drawer->ShadingAspect();
+        if (shadingAspect.IsNull()) {
+          shadingAspect = new Prs3d_ShadingAspect();
+          drawer->SetShadingAspect(shadingAspect);
+        }
+        Handle(Graphic3d_AspectFillArea3d) fillAspect = shadingAspect->Aspect();
+        if (!fillAspect.IsNull()) {
+          fillAspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
+        }
 
         presentation->SetAttributes(drawer);
         presentation->SynchronizeAspects();
