@@ -1,8 +1,15 @@
+#include <atomic>
+#include <cctype>
+#include <filesystem>
 #include <iostream>
+#include <string>
 
 #include <GLFW/glfw3.h>
 
 #include "GlfwOcctWindow.h"
+
+#define DMON_IMPL
+#include "dmon.h"
 
 // OCCT Core / Framework Data
 #include <BinXCAFDrivers.hxx>
@@ -34,48 +41,81 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
+namespace {
+std::string NormalizePath(std::string path) {
+  for (char &ch : path) {
+    if (ch == '\\') {
+      ch = '/';
+    }
+#ifdef _WIN32
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+#endif
+  }
+
+  while (path.size() > 1 && path.back() == '/') {
+    path.pop_back();
+  }
+
+  return path;
+}
+
+struct ModelWatchContext {
+  std::atomic_bool *reloadRequested;
+  std::string watchedFileAbsolutePath;
+};
+
+void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
+                        const char *filepath, const char *oldfilepath,
+                        void *user) {
+  if (user == nullptr) {
+    return;
+  }
+
+  auto *watchContext = static_cast<ModelWatchContext *>(user);
+  auto matchesWatchedFile = [&](const char *relativePath) {
+    if (relativePath == nullptr || relativePath[0] == '\0') {
+      return false;
+    }
+
+    std::string fullPath = rootdir != nullptr ? rootdir : "";
+    if (!fullPath.empty() && fullPath.back() != '/') {
+      fullPath.push_back('/');
+    }
+    fullPath += relativePath;
+
+    return NormalizePath(fullPath) == watchContext->watchedFileAbsolutePath;
+  };
+
+  if (matchesWatchedFile(filepath) || matchesWatchedFile(oldfilepath)) {
+    watchContext->reloadRequested->store(true, std::memory_order_release);
+  }
+}
+} // namespace
+
 int main(int argc, char *argv[]) {
   if (argc < 2) {
     std::cout << "Usage: " << argv[0] << " <path_to_step_file.stp>"
               << std::endl;
     return 1;
   }
-  TCollection_AsciiString filePath(argv[1]);
+
+  const std::filesystem::path stepPathInput(argv[1]);
+  const std::filesystem::path stepPathAbsolute =
+      std::filesystem::absolute(stepPathInput).lexically_normal();
+  const std::string stepPathForOcct = stepPathAbsolute.string();
+  const std::string watchedStepFilePath = NormalizePath(stepPathForOcct);
+
+  const std::filesystem::path watchRootPath =
+      stepPathAbsolute.parent_path().empty()
+          ? std::filesystem::current_path()
+          : stepPathAbsolute.parent_path();
+  const std::string watchRootForDmon = watchRootPath.lexically_normal().string();
 
   // 1. Initialize an OCAF/XCAF Application Document Context
   Handle(TDocStd_Application) app = new TDocStd_Application();
   BinXCAFDrivers::DefineFormat(app); // Ensure data drivers are registered
-  Handle(TDocStd_Document) doc;
-  app->NewDocument("BinXCAF", doc);
 
-  // 2. Read the STEP File into the XCAF Document with Color/Name parsing
-  // enabled
-  STEPCAFControl_Reader reader;
-  reader.SetColorMode(Standard_True);
-  reader.SetNameMode(Standard_True);
-  reader.SetLayerMode(Standard_True);
-
-  IFSelect_ReturnStatus readStatus = reader.ReadFile(filePath.ToCString());
-  if (readStatus != IFSelect_RetDone) {
-    std::cerr << "Error: Unable to parse or read file: " << filePath.ToCString()
-              << std::endl;
-    return 1;
-  }
-
-  if (!reader.Transfer(doc)) {
-    std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
-                 "the XCAF document framework."
-              << std::endl;
-    return 1;
-  }
-
-  // 3. Extract the Primary Model Tools from the Root Node
-  Handle(XCAFDoc_ShapeTool) shapeTool =
-      XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-  Handle(XCAFDoc_ColorTool) colorTool =
-      XCAFDoc_DocumentTool::ColorTool(doc->Main());
-
-  // 4. Create a real GLFW/OpenGL window and bind OCCT view to it
+  // 2. Create a real GLFW/OpenGL window and bind OCCT view to it
   if (!glfwInit()) {
     std::cerr << "Error: glfwInit() failed." << std::endl;
     return 1;
@@ -108,39 +148,111 @@ int main(int argc, char *argv[]) {
     occtWindow->Map();
   }
 
-  // 5. Query Assembly Information and attach presentation
-  TDF_LabelSequence freeShapes;
-  shapeTool->GetFreeShapes(freeShapes);
-  if (freeShapes.IsEmpty()) {
-    std::cerr << "Error: Document context yields no free structural components."
-              << std::endl;
+  const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
+  const Standard_Boolean kApplyTintColor = Standard_False;
+  const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
+
+  Handle(TDocStd_Document) doc;
+  Handle(XCAFDoc_ShapeTool) shapeTool;
+  Handle(XCAFDoc_ColorTool) colorTool;
+  TDF_Label rootLabel;
+  Handle(XCAFPrs_AISObject) xcafPresentation;
+
+  auto loadModelFromDisk = [&]() -> bool {
+    Handle(TDocStd_Document) newDoc;
+    app->NewDocument("BinXCAF", newDoc);
+
+    STEPCAFControl_Reader reader;
+    reader.SetColorMode(Standard_True);
+    reader.SetNameMode(Standard_True);
+    reader.SetLayerMode(Standard_True);
+
+    IFSelect_ReturnStatus readStatus = reader.ReadFile(stepPathForOcct.c_str());
+    if (readStatus != IFSelect_RetDone) {
+      std::cerr << "Error: Unable to parse or read file: " << stepPathForOcct
+                << std::endl;
+      app->Close(newDoc);
+      return false;
+    }
+
+    if (!reader.Transfer(newDoc)) {
+      std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
+                   "the XCAF document framework."
+                << std::endl;
+      app->Close(newDoc);
+      return false;
+    }
+
+    Handle(XCAFDoc_ShapeTool) newShapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(newDoc->Main());
+    Handle(XCAFDoc_ColorTool) newColorTool =
+        XCAFDoc_DocumentTool::ColorTool(newDoc->Main());
+
+    TDF_LabelSequence freeShapes;
+    newShapeTool->GetFreeShapes(freeShapes);
+    if (freeShapes.IsEmpty()) {
+      std::cerr << "Error: Document context yields no free structural "
+                   "components."
+                << std::endl;
+      app->Close(newDoc);
+      return false;
+    }
+
+    const TDF_Label newRootLabel = freeShapes.First();
+    Handle(XCAFPrs_AISObject) newPresentation =
+        new XCAFPrs_AISObject(newRootLabel);
+
+    Handle(TDocStd_Document) oldDoc = doc;
+    Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
+
+    doc = newDoc;
+    shapeTool = newShapeTool;
+    colorTool = newColorTool;
+    rootLabel = newRootLabel;
+    xcafPresentation = newPresentation;
+
+    if (!oldPresentation.IsNull()) {
+      context->Remove(oldPresentation, Standard_False);
+    }
+
+    context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
+    context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
+    context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
+    if (kApplyTintColor) {
+      context->SetColor(xcafPresentation, kTintColor, Standard_False);
+    }
+
+    view->FitAll();
+    view->ZFitAll();
+    context->UpdateCurrentViewer();
+
+    if (!oldDoc.IsNull()) {
+      app->Close(oldDoc);
+    }
+
+    return true;
+  };
+
+  if (!loadModelFromDisk()) {
     glfwTerminate();
     return 1;
   }
 
-  TDF_Label rootLabel = freeShapes.First();
-  Handle(XCAFPrs_AISObject) xcafPresentation = new XCAFPrs_AISObject(rootLabel);
+  std::atomic_bool reloadRequested(false);
+  ModelWatchContext watchContext{&reloadRequested, watchedStepFilePath};
 
-  // Render as solid shaded faces (instead of wireframe).
-  context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
-  context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
-
-  // Optional visual tuning.
-  const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
-  const Standard_Boolean kApplyTintColor = Standard_False;
-  const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
-  context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
-  if (kApplyTintColor) {
-    context->SetColor(xcafPresentation, kTintColor, Standard_False);
+  dmon_init();
+  dmon_watch_id watchId = dmon_watch(watchRootForDmon.c_str(), OnModelFileChanged,
+                                     0, &watchContext);
+  if (watchId.id == 0) {
+    std::cerr << "Warning: dmon could not watch directory: " << watchRootForDmon
+              << std::endl;
   }
-
-  view->FitAll();
-  view->ZFitAll();
-  context->UpdateCurrentViewer();
 
   std::cout
       << "Left click a face to print its XCAF label/color. Press ESC to quit."
       << std::endl;
+  std::cout << "Watching model file for changes: " << stepPathForOcct << std::endl;
 
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
@@ -156,13 +268,21 @@ int main(int argc, char *argv[]) {
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
                          &lastFbHeight);
 
-  // 6. Event/render loop
+  // 3. Event/render loop
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
     glfwPollEvents();
 
     if (glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_ESCAPE) ==
         GLFW_PRESS) {
       glfwSetWindowShouldClose(occtWindow->getGlfwWindow(), GLFW_TRUE);
+    }
+
+    if (reloadRequested.exchange(false, std::memory_order_acquire)) {
+      if (loadModelFromDisk()) {
+        std::cout << "Model reloaded from disk." << std::endl;
+      } else {
+        std::cerr << "Model reload failed; keeping previous scene." << std::endl;
+      }
     }
 
     glfwMakeContextCurrent(occtWindow->getGlfwWindow());
@@ -228,7 +348,7 @@ int main(int argc, char *argv[]) {
         Handle(StdSelect_BRepOwner) brepOwner =
             Handle(StdSelect_BRepOwner)::DownCast(owner);
 
-        if (brepOwner.IsNull()) {
+        if (brepOwner.IsNull() || shapeTool.IsNull() || colorTool.IsNull()) {
           continue;
         }
 
@@ -268,7 +388,13 @@ int main(int argc, char *argv[]) {
     view->Redraw();
   }
 
-  // Clean up allocated storage bounds before shutdown
-  app->Close(doc);
+  if (watchId.id != 0) {
+    dmon_unwatch(watchId);
+  }
+  dmon_deinit();
+
+  if (!doc.IsNull()) {
+    app->Close(doc); // calls glfwTerminate()
+  }
   return 0;
 }
