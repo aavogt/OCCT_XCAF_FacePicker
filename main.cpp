@@ -29,7 +29,13 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Aspect_TypeOfLine.hxx>
+#include <Graphic3d_AspectFillArea3d.hxx>
+#include <Graphic3d_TypeOfShadingModel.hxx>
 #include <OpenGl_GraphicDriver.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Prs3d_LineAspect.hxx>
+#include <Prs3d_ShadingAspect.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
@@ -158,6 +164,34 @@ int main(int argc, char *argv[]) {
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) xcafPresentation;
 
+  auto applyPresentationStyling = [&](const Handle(XCAFPrs_AISObject) &presentation) {
+    if (presentation.IsNull()) {
+      return;
+    }
+
+    Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
+    drawer->Link(context->DefaultDrawer());
+
+    // Draw model edges as thin black boundaries while staying in shaded mode.
+    drawer->SetFaceBoundaryDraw(Standard_True);
+    Handle(Prs3d_LineAspect) faceBoundaryAspect =
+        new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f);
+    drawer->SetFaceBoundaryAspect(faceBoundaryAspect);
+
+    // Use a physically-based shading model (shader lighting path similar to F3D style).
+    Handle(Prs3d_ShadingAspect) shadingAspect = drawer->ShadingAspect();
+    if (shadingAspect.IsNull()) {
+      shadingAspect = new Prs3d_ShadingAspect();
+      drawer->SetShadingAspect(shadingAspect);
+    }
+    Handle(Graphic3d_AspectFillArea3d) fillAspect = shadingAspect->Aspect();
+    if (!fillAspect.IsNull()) {
+      fillAspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
+    }
+
+    presentation->SetAttributes(drawer);
+  };
+
   auto loadModelFromDisk = [&]() -> bool {
     Handle(TDocStd_Document) newDoc;
     app->NewDocument("BinXCAF", newDoc);
@@ -201,6 +235,7 @@ int main(int argc, char *argv[]) {
     const TDF_Label newRootLabel = freeShapes.First();
     Handle(XCAFPrs_AISObject) newPresentation =
         new XCAFPrs_AISObject(newRootLabel);
+    applyPresentationStyling(xcafPresentation);
 
     Handle(TDocStd_Document) oldDoc = doc;
     Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
@@ -216,6 +251,9 @@ int main(int argc, char *argv[]) {
     }
 
     context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
+    // Keep only face picking active; disable global selection mode that can
+    // capture whole assemblies/edges and break face-click behavior.
+    context->SetSelectionModeActive(xcafPresentation, 1, Standard_False);
     context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
     context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
     if (kApplyTintColor) {
@@ -395,7 +433,7 @@ int main(int argc, char *argv[]) {
   dmon_deinit();
 
   if (!doc.IsNull()) {
-    app->Close(doc); // calls glfwTerminate()
+    app->Close(doc); // calls glfwTerminate() no need to add it below
   }
   return 0;
 }
