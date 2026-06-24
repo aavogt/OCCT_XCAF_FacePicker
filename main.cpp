@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cmath>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
@@ -74,6 +75,24 @@ struct ModelWatchContext {
   std::atomic_bool *reloadRequested;
   std::string watchedFileAbsolutePath;
 };
+
+struct MouseScrollContext {
+  double deltaY = 0.0;
+};
+
+void OnMouseScroll(GLFWwindow *window, double, double yoffset) {
+  if (window == nullptr) {
+    return;
+  }
+
+  auto *scrollContext =
+      static_cast<MouseScrollContext *>(glfwGetWindowUserPointer(window));
+  if (scrollContext == nullptr) {
+    return;
+  }
+
+  scrollContext->deltaY += yoffset;
+}
 
 void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
                         const char *filepath, const char *oldfilepath,
@@ -342,6 +361,9 @@ int main(int argc, char *argv[]) {
 
   std::atomic_bool reloadRequested(false);
   ModelWatchContext watchContext{&reloadRequested, watchedStepFilePath};
+  MouseScrollContext scrollContext;
+  glfwSetWindowUserPointer(occtWindow->getGlfwWindow(), &scrollContext);
+  glfwSetScrollCallback(occtWindow->getGlfwWindow(), OnMouseScroll);
 
   dmon_init();
   dmon_watch_id watchId = dmon_watch(watchRootForDmon.c_str(),
@@ -403,6 +425,14 @@ int main(int argc, char *argv[]) {
 
     double mouseX = 0.0, mouseY = 0.0;
     glfwGetCursorPos(occtWindow->getGlfwWindow(), &mouseX, &mouseY);
+
+    if (scrollContext.deltaY != 0.0) {
+      const Standard_Real zoomFactor =
+          (Standard_Real)std::pow(1.12, scrollContext.deltaY);
+      view->SetZoom(zoomFactor, Standard_True);
+      scrollContext.deltaY = 0.0;
+    }
+
     context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
                     Standard_True);
 
