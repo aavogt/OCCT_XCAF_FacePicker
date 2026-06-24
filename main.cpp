@@ -126,7 +126,7 @@ int main(int argc, char *argv[]) {
   context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
 
   // Optional visual tuning.
-  const Standard_Real kModelTransparency = 0.15; // 0.0 = opaque, 1.0 = invisible
+  const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
   const Standard_Boolean kApplyTintColor = Standard_False;
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
   context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
