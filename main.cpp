@@ -19,6 +19,7 @@
 #include <STEPCAFControl_Reader.hxx>
 
 // Visualization & Presentation
+#include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -119,8 +120,19 @@ int main(int argc, char *argv[]) {
 
   TDF_Label rootLabel = freeShapes.First();
   Handle(XCAFPrs_AISObject) xcafPresentation = new XCAFPrs_AISObject(rootLabel);
-  context->Display(xcafPresentation, Standard_True);
+
+  // Render as solid shaded faces (instead of wireframe).
+  context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
   context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
+
+  // Optional visual tuning.
+  const Standard_Real kModelTransparency = 0.15; // 0.0 = opaque, 1.0 = invisible
+  const Standard_Boolean kApplyTintColor = Standard_False;
+  const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
+  context->SetTransparency(xcafPresentation, kModelTransparency, Standard_False);
+  if (kApplyTintColor) {
+    context->SetColor(xcafPresentation, kTintColor, Standard_False);
+  }
 
   view->FitAll();
   view->ZFitAll();
@@ -131,6 +143,14 @@ int main(int argc, char *argv[]) {
       << std::endl;
 
   bool wasLeftPressed = false;
+  bool wasRightPressed = false;
+  bool wasMiddlePressed = false;
+
+  double rotateStartX = 0.0;
+  double rotateStartY = 0.0;
+  double panStartX = 0.0;
+  double panStartY = 0.0;
+
   int lastFbWidth = 0;
   int lastFbHeight = 0;
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
@@ -164,8 +184,41 @@ int main(int argc, char *argv[]) {
     const bool isLeftPressed =
         glfwGetMouseButton(occtWindow->getGlfwWindow(),
                            GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    const bool isRightPressed =
+        glfwGetMouseButton(occtWindow->getGlfwWindow(),
+                           GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    const bool isMiddlePressed =
+        glfwGetMouseButton(occtWindow->getGlfwWindow(),
+                           GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
 
-    if (isLeftPressed && !wasLeftPressed) {
+    // Right mouse drag: orbit/rotate camera.
+    if (isRightPressed) {
+      if (!wasRightPressed) {
+        rotateStartX = mouseX;
+        rotateStartY = mouseY;
+      }
+      const Standard_Real dx = (Standard_Real)(mouseX - rotateStartX);
+      const Standard_Real dy = (Standard_Real)(mouseY - rotateStartY);
+      view->Rotate(dx * 0.005, -dy * 0.005, 0.0,
+                   wasRightPressed ? Standard_False : Standard_True);
+    }
+
+    // Middle mouse drag: pan/translate camera.
+    if (isMiddlePressed) {
+      if (!wasMiddlePressed) {
+        panStartX = mouseX;
+        panStartY = mouseY;
+      }
+      const Standard_Real dx = (Standard_Real)(mouseX - panStartX);
+      const Standard_Real dy = (Standard_Real)(mouseY - panStartY);
+      const Standard_Real dxView = view->Convert((Standard_Integer)dx);
+      const Standard_Real dyView = view->Convert((Standard_Integer)-dy);
+      view->Panning(dxView, dyView, 1.0,
+                    wasMiddlePressed ? Standard_False : Standard_True);
+    }
+
+    // Left click: select/detect face.
+    if (isLeftPressed && !wasLeftPressed && !isRightPressed && !isMiddlePressed) {
       context->SelectDetected();
 
       for (context->InitSelected(); context->MoreSelected();
@@ -208,6 +261,8 @@ int main(int argc, char *argv[]) {
     }
 
     wasLeftPressed = isLeftPressed;
+    wasRightPressed = isRightPressed;
+    wasMiddlePressed = isMiddlePressed;
 
     view->Redraw();
   }
