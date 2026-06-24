@@ -291,6 +291,7 @@ int main(int argc, char *argv[]) {
     int fbHeight = 0;
     glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &fbWidth, &fbHeight);
     if (fbWidth != lastFbWidth || fbHeight != lastFbHeight) {
+      occtWindow->DoResize();
       view->MustBeResized();
       lastFbWidth = fbWidth;
       lastFbHeight = fbHeight;
