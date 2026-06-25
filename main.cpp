@@ -1,6 +1,6 @@
 #include <atomic>
-#include <cmath>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -41,9 +41,9 @@
 #include <Standard_Failure.hxx>
 
 // Visualization & Presentation
-#include <AIS_LightSource.hxx>
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
+#include <AIS_LightSource.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfLine.hxx>
 #include <Graphic3d_NameOfTextureEnv.hxx>
@@ -54,9 +54,9 @@
 #include <Prs3d_LineAspect.hxx>
 #include <Prs3d_ShadingAspect.hxx>
 #include <StdSelect_BRepOwner.hxx>
-#include <V3d_View.hxx>
 #include <V3d_AmbientLight.hxx>
 #include <V3d_DirectionalLight.hxx>
+#include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 #include <XCAFPrs_AISObject.hxx>
 
@@ -277,7 +277,7 @@ int main(int argc, char *argv[]) {
   Handle(AIS_LightSource) sceneLightSource;
   for (V3d_ListOfLightIterator lightIt(viewer->ActiveLights()); lightIt.More();
        lightIt.Next()) {
-    const Handle(V3d_Light)& activeLight = lightIt.Value();
+    const Handle(V3d_Light) &activeLight = lightIt.Value();
     if (activeLight.IsNull()) {
       continue;
     }
@@ -311,40 +311,40 @@ int main(int argc, char *argv[]) {
   Handle(XCAFPrs_AISObject) xcafPresentation;
   std::unordered_map<std::string, std::string> labelSourceByEntry;
 
-  auto applyPresentationStyling =
-      [&](const Handle(XCAFPrs_AISObject) &presentation) {
-        if (presentation.IsNull()) {
-          return;
-        }
+  auto applyPresentationStyling = [&](const Handle(XCAFPrs_AISObject) &
+                                      presentation) {
+    if (presentation.IsNull()) {
+      return;
+    }
 
-        // Reuse object drawer (do not replace XCAF internals), but ensure it is
-        // linked to context defaults.
-        Handle(Prs3d_Drawer) drawer = presentation->Attributes();
-        if (drawer.IsNull()) {
-          drawer = new Prs3d_Drawer();
-        }
-        drawer->Link(context->DefaultDrawer());
+    // Reuse object drawer (do not replace XCAF internals), but ensure it is
+    // linked to context defaults.
+    Handle(Prs3d_Drawer) drawer = presentation->Attributes();
+    if (drawer.IsNull()) {
+      drawer = new Prs3d_Drawer();
+    }
+    drawer->Link(context->DefaultDrawer());
 
-        // Black edge overlay in shaded mode.
-        drawer->SetFaceBoundaryDraw(Standard_True);
-        drawer->SetFaceBoundaryAspect(
-            new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f));
+    // Black edge overlay in shaded mode.
+    drawer->SetFaceBoundaryDraw(Standard_True);
+    drawer->SetFaceBoundaryAspect(
+        new Prs3d_LineAspect(Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0f));
 
-        // Restore PBR shading model per-object (XCAF presentations may have own
-        // aspects that override context defaults).
-        Handle(Prs3d_ShadingAspect) shadingAspect = drawer->ShadingAspect();
-        if (shadingAspect.IsNull()) {
-          shadingAspect = new Prs3d_ShadingAspect();
-          drawer->SetShadingAspect(shadingAspect);
-        }
-        Handle(Graphic3d_AspectFillArea3d) fillAspect = shadingAspect->Aspect();
-        if (!fillAspect.IsNull()) {
-          fillAspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
-        }
+    // Restore PBR shading model per-object (XCAF presentations may have own
+    // aspects that override context defaults).
+    Handle(Prs3d_ShadingAspect) shadingAspect = drawer->ShadingAspect();
+    if (shadingAspect.IsNull()) {
+      shadingAspect = new Prs3d_ShadingAspect();
+      drawer->SetShadingAspect(shadingAspect);
+    }
+    Handle(Graphic3d_AspectFillArea3d) fillAspect = shadingAspect->Aspect();
+    if (!fillAspect.IsNull()) {
+      fillAspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Pbr);
+    }
 
-        presentation->SetAttributes(drawer);
-        presentation->SynchronizeAspects();
-      };
+    presentation->SetAttributes(drawer);
+    presentation->SynchronizeAspects();
+  };
 
   auto loadModelFromDisk = [&]() -> bool {
     Handle(TDocStd_Document) newDoc;
