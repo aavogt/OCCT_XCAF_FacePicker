@@ -198,9 +198,17 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
+  bool wanthelp = (argc >= 2 && (strcmp(argv[1], "--help") == 0 ||
+                                 strcmp(argv[1], "-h") == 0));
+  if (argc < 2 || wanthelp) {
     std::cout << "Usage: " << argv[0] << " <path_to_step_file.stp>"
               << std::endl;
+    if (wanthelp) {
+      std::cout
+          << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
+             "pan\n\tRight click to rotate\n\tESC to quit."
+          << std::endl;
+    }
     return 1;
   }
 
@@ -355,6 +363,7 @@ int main(int argc, char *argv[]) {
     if (readStatus != IFSelect_RetDone) {
       std::cerr << "Error: Unable to parse or read file: " << stepPathForOcct
                 << std::endl;
+
       app->Close(newDoc);
       return false;
     }
@@ -470,10 +479,6 @@ int main(int argc, char *argv[]) {
     std::cerr << "Warning: dmon could not watch directory: " << watchRootForDmon
               << std::endl;
   }
-
-  std::cout << "Left click to jump with nvim-remote.sh\nMiddle click to "
-               "pan\nRight click to rotate\nESC to quit."
-            << std::endl;
 
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
@@ -599,28 +604,16 @@ int main(int argc, char *argv[]) {
         TDF_Tool::Entry(targetFaceLabel, pickedEntry);
         const std::string pickedEntryStr = pickedEntry.ToCString();
 
-        std::cout << "Detected Sub-Shape Label Reference: " << pickedEntryStr;
+        std::cout << pickedEntryStr;
         const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
         if (sourceIt != labelSourceByEntry.end()) {
-          std::cout << " (" << sourceIt->second << ")";
+          std::cout << ":" << sourceIt->second;
           if (!LaunchNvimRemote(sourceIt->second)) {
             std::cerr << "Warning: failed to launch nvim-remote.sh for source: "
                       << sourceIt->second << std::endl;
           }
         }
         std::cout << std::endl;
-
-        Quantity_Color exactColor;
-        if (colorTool->GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
-                                exactColor)) {
-          std::cout << "  -> Direct Face Surface Color (RGB): "
-                    << exactColor.Red() << ", " << exactColor.Green() << ", "
-                    << exactColor.Blue() << std::endl;
-        } else {
-          std::cout << "  -> Direct face color attribute missing from this "
-                       "individual face sub-label."
-                    << std::endl;
-        }
       }
     }
 
