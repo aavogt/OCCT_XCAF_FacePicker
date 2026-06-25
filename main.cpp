@@ -1,6 +1,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <csignal>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -172,6 +173,7 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
     return false;
   }
 
+  signal(SIGINT, SIG_DFL);
   pid_t pid = fork();
   if (pid < 0) {
     std::cerr << "Warning: fork() failed while launching nvim-remote.sh."
@@ -180,6 +182,10 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
   }
 
   if (pid == 0) {
+    if (daemon(1, 0) < 0) {
+      perror("daemon");
+      exit(1);
+    }
     char *const args[] = {const_cast<char *>("nvim-remote.sh"),
                           const_cast<char *>(sourceLocation.c_str()), nullptr};
     execvp(args[0], args);
@@ -262,16 +268,6 @@ int main(int argc, char *argv[]) {
   view->SetWindow(occtWindow, occtWindow->NativeGlContext());
   if (!occtWindow->IsMapped()) {
     occtWindow->Map();
-  }
-
-  try {
-    Handle(Graphic3d_TextureEnv) envTexture =
-        new Graphic3d_TextureEnv(Graphic3d_NOT_ENV_SKY2);
-    view->SetTextureEnv(envTexture);
-    view->SetImageBasedLighting(Standard_True, Standard_False);
-  } catch (const Standard_Failure &failure) {
-    std::cerr << "Warning: could not enable environment/IBL: "
-              << failure.GetMessageString() << std::endl;
   }
 
   Handle(AIS_LightSource) sceneLightSource;
@@ -475,10 +471,8 @@ int main(int argc, char *argv[]) {
               << std::endl;
   }
 
-  std::cout
-      << "Left click a face to print its XCAF label/color. Press ESC to quit."
-      << std::endl;
-  std::cout << "Watching model file for changes: " << stepPathForOcct
+  std::cout << "Left click to jump with nvim-remote.sh\nMiddle click to "
+               "pan\nRight click to rotate\nESC to quit."
             << std::endl;
 
   bool wasLeftPressed = false;
