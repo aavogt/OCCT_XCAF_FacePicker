@@ -4,6 +4,11 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+
+#include <HeaderSection_FileDescription.hxx>
+#include <Interface_HArray1OfHAsciiString.hxx>
+#include <StepData_StepModel.hxx>
 
 #include <GLFW/glfw3.h>
 
@@ -12,9 +17,13 @@
 #define DMON_IMPL
 #include "dmon.h"
 
+#include <XSControl.hxx>
+#include <XSControl_WorkSession.hxx>
 // OCCT Core / Framework Data
 #include <BinXCAFDrivers.hxx>
+#include <TCollection_AsciiString.hxx>
 #include <TDF_Label.hxx>
+#include <TDF_Tool.hxx>
 #include <TDocStd_Application.hxx>
 #include <TDocStd_Document.hxx>
 
@@ -79,6 +88,33 @@ struct ModelWatchContext {
 struct MouseScrollContext {
   double deltaY = 0.0;
 };
+
+bool SplitEntryAndSourceLocation(const std::string &line, std::string &entryOut,
+                                 std::string &sourceOut) {
+  std::size_t splitPos = std::string::npos;
+  int colonCount = 0;
+
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    if (line[i] != ':') {
+      continue;
+    }
+
+    ++colonCount;
+    if (colonCount == 5) {
+      splitPos = i;
+      break;
+    }
+  }
+
+  if (splitPos == std::string::npos || splitPos == 0 ||
+      splitPos + 1 >= line.size()) {
+    return false;
+  }
+
+  entryOut = line.substr(0, splitPos);
+  sourceOut = line.substr(splitPos + 1);
+  return !entryOut.empty() && !sourceOut.empty();
+}
 
 void OnMouseScroll(GLFWwindow *window, double, double yoffset) {
   if (window == nullptr) {
@@ -240,6 +276,7 @@ int main(int argc, char *argv[]) {
   Handle(XCAFDoc_ColorTool) colorTool;
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) xcafPresentation;
+  std::unordered_map<std::string, std::string> labelSourceByEntry;
 
   auto applyPresentationStyling =
       [&](const Handle(XCAFPrs_AISObject) &presentation) {
@@ -291,6 +328,38 @@ int main(int argc, char *argv[]) {
                 << std::endl;
       app->Close(newDoc);
       return false;
+    }
+
+    labelSourceByEntry.clear();
+    {
+      Handle(StepData_StepModel) model =
+          Handle(StepData_StepModel)::DownCast(reader.Reader().WS()->Model());
+      if (!model.IsNull()) {
+        Handle(HeaderSection_FileDescription) fileDescription =
+            Handle(HeaderSection_FileDescription)::DownCast(model->HeaderEntity(
+                STANDARD_TYPE(HeaderSection_FileDescription)));
+        if (!fileDescription.IsNull()) {
+          Handle(Interface_HArray1OfHAsciiString) descriptions =
+              fileDescription->Description();
+          if (!descriptions.IsNull()) {
+            for (Standard_Integer i = descriptions->Lower();
+                 i <= descriptions->Upper(); ++i) {
+              const Handle(TCollection_HAsciiString) &lineH =
+                  descriptions->Value(i);
+              if (lineH.IsNull()) {
+                continue;
+              }
+
+              const std::string line = lineH->ToCString();
+              std::string entry;
+              std::string source;
+              if (SplitEntryAndSourceLocation(line, entry, source)) {
+                labelSourceByEntry[entry] = source;
+              }
+            }
+          }
+        }
+      }
     }
 
     if (!reader.Transfer(newDoc)) {
@@ -499,8 +568,15 @@ int main(int argc, char *argv[]) {
           continue;
         }
 
-        std::cout << "Detected Sub-Shape Label Reference: ";
-        targetFaceLabel.EntryDump(std::cout);
+        TCollection_AsciiString pickedEntry;
+        TDF_Tool::Entry(targetFaceLabel, pickedEntry);
+        const std::string pickedEntryStr = pickedEntry.ToCString();
+
+        std::cout << "Detected Sub-Shape Label Reference: " << pickedEntryStr;
+        const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
+        if (sourceIt != labelSourceByEntry.end()) {
+          std::cout << " (" << sourceIt->second << ")";
+        }
         std::cout << std::endl;
 
         Quantity_Color exactColor;
