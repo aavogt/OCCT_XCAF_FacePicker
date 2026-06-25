@@ -6,6 +6,10 @@
 #include <string>
 #include <unordered_map>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <HeaderSection_FileDescription.hxx>
 #include <Interface_HArray1OfHAsciiString.hxx>
 #include <StepData_StepModel.hxx>
@@ -155,6 +159,35 @@ void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
   if (matchesWatchedFile(filepath) || matchesWatchedFile(oldfilepath)) {
     watchContext->reloadRequested->store(true, std::memory_order_release);
   }
+}
+
+bool LaunchNvimRemote(const std::string &sourceLocation) {
+#ifdef _WIN32
+  (void)sourceLocation;
+  std::cerr << "Warning: nvim-remote.sh launch is not supported on Windows."
+            << std::endl;
+  return false;
+#else
+  if (sourceLocation.empty()) {
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    std::cerr << "Warning: fork() failed while launching nvim-remote.sh."
+              << std::endl;
+    return false;
+  }
+
+  if (pid == 0) {
+    char *const args[] = {const_cast<char *>("nvim-remote.sh"),
+                          const_cast<char *>(sourceLocation.c_str()), nullptr};
+    execvp(args[0], args);
+    _exit(127);
+  }
+
+  return true;
+#endif
 }
 } // namespace
 
@@ -576,6 +609,10 @@ int main(int argc, char *argv[]) {
         const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
         if (sourceIt != labelSourceByEntry.end()) {
           std::cout << " (" << sourceIt->second << ")";
+          if (!LaunchNvimRemote(sourceIt->second)) {
+            std::cerr << "Warning: failed to launch nvim-remote.sh for source: "
+                      << sourceIt->second << std::endl;
+          }
         }
         std::cout << std::endl;
 
