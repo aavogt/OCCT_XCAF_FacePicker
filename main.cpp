@@ -394,8 +394,11 @@ SockaddrUn MakeSockaddrUn(const std::filesystem::path &socketPath) {
 
 bool SendForwardNavigationRequest(const std::filesystem::path &socketPath,
                                   const std::string &queryLine,
-                                  std::string &errorOut) {
+                                  std::string &errorOut, int *errorCodeOut) {
   errorOut.clear();
+  if (errorCodeOut != nullptr) {
+    *errorCodeOut = 0;
+  }
 
   if (queryLine.empty()) {
     errorOut = "query is empty";
@@ -410,7 +413,11 @@ bool SendForwardNavigationRequest(const std::filesystem::path &socketPath,
 
   const int clientFd = socket(AF_UNIX, SOCK_DGRAM, 0);
   if (clientFd < 0) {
-    errorOut = std::string("socket() failed: ") + std::strerror(errno);
+    const int err = errno;
+    if (errorCodeOut != nullptr) {
+      *errorCodeOut = err;
+    }
+    errorOut = std::string("socket() failed: ") + std::strerror(err);
     return false;
   }
 
@@ -420,11 +427,15 @@ bool SendForwardNavigationRequest(const std::filesystem::path &socketPath,
   const ssize_t bytesSent =
       sendto(clientFd, payload.data(), payload.size(), 0,
              reinterpret_cast<const sockaddr *>(&addr.addr), addr.len);
+  const int sendErr = (bytesSent < 0) ? errno : 0;
   const int closeRc = close(clientFd);
   (void)closeRc;
 
   if (bytesSent < 0) {
-    errorOut = std::string("sendto() failed: ") + std::strerror(errno);
+    if (errorCodeOut != nullptr) {
+      *errorCodeOut = sendErr;
+    }
+    errorOut = std::string("sendto() failed: ") + std::strerror(sendErr);
     return false;
   }
 
@@ -661,12 +672,22 @@ int main(int argc, char *argv[]) {
     return 1;
 #else
     std::string sendError;
-    if (!SendForwardNavigationRequest(socketPath, cliForwardQuery, sendError)) {
+    int sendErrno = 0;
+    if (SendForwardNavigationRequest(socketPath, cliForwardQuery, sendError,
+                                     &sendErrno)) {
+      return 0;
+    }
+
+    const bool socketUnavailable =
+        (sendErrno == ENOENT || sendErrno == ECONNREFUSED);
+    if (argc == 3 && socketUnavailable) {
+      std::cerr << "Forward navigation socket unavailable; opening viewer for "
+                << argv[1] << " and applying query locally." << std::endl;
+    } else {
       std::cerr << "Error: could not send forward-navigation query to "
                 << socketPath << ": " << sendError << std::endl;
       return 1;
     }
-    return 0;
 #endif
   }
 
@@ -997,6 +1018,55 @@ int main(int argc, char *argv[]) {
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
                          &lastFbHeight);
 
+  auto applyForwardNavigationQuery = [&](const std::string &rawQueryLine) {
+    SourceQuery query;
+    std::string canonicalQuerySource;
+    std::string parseError;
+    if (!ParseForwardQuery(rawQueryLine, query, canonicalQuerySource,
+                           parseError)) {
+      std::cerr << "Forward navigation ignored: " << parseError << " (query='"
+                << rawQueryLine << "')" << std::endl;
+      return;
+    }
+
+    std::string resolvedSource;
+    std::vector<std::string> resolvedEntries;
+    if (!ResolveForwardNavigationQuery(forwardNavigationData, query,
+                                       resolvedSource, resolvedEntries)) {
+      std::cerr << "Forward navigation: no mapped face for "
+                << canonicalQuerySource << std::endl;
+      HighlightFacesForEntries({}, doc, shapeTool, context, view,
+                               forwardNavHighlight);
+      return;
+    }
+
+    HighlightFacesForEntries(resolvedEntries, doc, shapeTool, context, view,
+                             forwardNavHighlight);
+    if (!forwardNavHighlight.IsNull()) {
+      view->FitAll();
+      view->ZFitAll();
+      context->UpdateCurrentViewer();
+    }
+
+    std::cout << "Forward navigation: " << canonicalQuerySource << " -> "
+              << resolvedSource;
+    if (!resolvedEntries.empty()) {
+      std::cout << " [";
+      for (std::size_t i = 0; i < resolvedEntries.size(); ++i) {
+        if (i > 0) {
+          std::cout << ",";
+        }
+        std::cout << resolvedEntries[i];
+      }
+      std::cout << "]";
+    }
+    std::cout << std::endl;
+  };
+
+  if (argc == 3 && !cliForwardQuery.empty()) {
+    applyForwardNavigationQuery(cliForwardQuery);
+  }
+
   // 3. Event/render loop
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
     glfwPollEvents();
@@ -1019,48 +1089,7 @@ int main(int argc, char *argv[]) {
     if (forwardNavSocketFd >= 0) {
       std::string receivedLine;
       while (ReadSingleDatagramLine(forwardNavSocketFd, receivedLine)) {
-        SourceQuery query;
-        std::string canonicalQuerySource;
-        std::string parseError;
-        if (!ParseForwardQuery(receivedLine, query, canonicalQuerySource,
-                               parseError)) {
-          std::cerr << "Forward navigation ignored: " << parseError
-                    << " (query='" << receivedLine << "')" << std::endl;
-          continue;
-        }
-
-        std::string resolvedSource;
-        std::vector<std::string> resolvedEntries;
-        if (!ResolveForwardNavigationQuery(forwardNavigationData, query,
-                                           resolvedSource, resolvedEntries)) {
-          std::cerr << "Forward navigation: no mapped face for "
-                    << canonicalQuerySource << std::endl;
-          HighlightFacesForEntries({}, doc, shapeTool, context, view,
-                                   forwardNavHighlight);
-          continue;
-        }
-
-        HighlightFacesForEntries(resolvedEntries, doc, shapeTool, context, view,
-                                 forwardNavHighlight);
-        if (!forwardNavHighlight.IsNull()) {
-          view->FitAll();
-          view->ZFitAll();
-          context->UpdateCurrentViewer();
-        }
-
-        std::cout << "Forward navigation: " << canonicalQuerySource << " -> "
-                  << resolvedSource;
-        if (!resolvedEntries.empty()) {
-          std::cout << " [";
-          for (std::size_t i = 0; i < resolvedEntries.size(); ++i) {
-            if (i > 0) {
-              std::cout << ",";
-            }
-            std::cout << resolvedEntries[i];
-          }
-          std::cout << "]";
-        }
-        std::cout << std::endl;
+        applyForwardNavigationQuery(receivedLine);
       }
     }
 #endif

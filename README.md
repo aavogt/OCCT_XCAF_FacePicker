@@ -23,15 +23,21 @@ Opencascade headers `/usr/include/opencascade/XCAF*.hxx` are for metadata like c
 
 ## forward navigation
 
-The viewer manages a `.OCCT_XCAF_FacePicker.sock` fifo (creates/reads/destroys)
-The OCCT_XCAF_FacePicker executable can be used to write to that fifo to tell
-the currently running viewer to focus on face `0:1:1:1:2`:
+The viewer manages a Unix datagram socket at `.OCCT_XCAF_FacePicker.sock`
+(creates/reads/destroys it in the current working directory).
+
+The `OCCT_XCAF_FacePicker` executable can send a source-location query to the
+currently running viewer:
 
 ```bash
-OCCT_XCAF_FacePicker main.hs:9:13     # no match: leftwards
-OCCT_XCAF_FacePicker main.hs:+9:+13   # no match: rightwards
-OCCT_XCAF_FacePicker model.step main.hs:9:13 # also open if msising
+OCCT_XCAF_FacePicker main.hs:9:13           # no exact match: search leftwards
+OCCT_XCAF_FacePicker main.hs:+9:+13         # no exact match: search rightwards
+OCCT_XCAF_FacePicker model.step main.hs:9:13
 ```
+
+For the `model.step + query` form, if sending fails with socket-not-available
+errors (`ENOENT` / `ECONNREFUSED`), the app falls back to opening the viewer
+for `model.step` and applying the query locally.
 
 ## TODO
 
