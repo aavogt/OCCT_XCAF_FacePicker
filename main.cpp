@@ -1,13 +1,28 @@
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <csignal>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
+#include <limits>
+#include <map>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <unordered_map>
+#include <vector>
 
 #ifndef _WIN32
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 
@@ -45,6 +60,7 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_LightSource.hxx>
+#include <AIS_Shape.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfLine.hxx>
 #include <Graphic3d_NameOfTextureEnv.hxx>
@@ -62,8 +78,11 @@
 #include <XCAFPrs_AISObject.hxx>
 
 // Modeling & Structural Helpers
+#include <BRep_Builder.hxx>
 #include <Quantity_Color.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -93,6 +112,403 @@ struct ModelWatchContext {
 struct MouseScrollContext {
   double deltaY = 0.0;
 };
+
+struct SourcePosition {
+  std::string filePath;
+  int row = 0;
+  int column = 0;
+};
+
+struct SourceQuery {
+  SourcePosition position;
+  bool preferRightOnExact = false;
+};
+
+struct SourcePositionLess {
+  bool operator()(const SourcePosition &lhs, const SourcePosition &rhs) const {
+    if (lhs.filePath != rhs.filePath) {
+      return lhs.filePath < rhs.filePath;
+    }
+    if (lhs.row != rhs.row) {
+      return lhs.row < rhs.row;
+    }
+    return lhs.column < rhs.column;
+  }
+};
+
+struct ForwardNavigationData {
+  std::multimap<SourcePosition, std::string, SourcePositionLess> entryBySource;
+};
+
+#ifndef _WIN32
+struct SockaddrUn {
+  sockaddr_un addr{};
+  socklen_t len = 0;
+};
+#endif
+
+bool ParseStrictPositiveInt(std::string_view text, int &valueOut) {
+  if (text.empty()) {
+    return false;
+  }
+
+  long value = 0;
+  for (char ch : text) {
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+    value = value * 10 + static_cast<long>(ch - '0');
+    if (value > static_cast<long>(std::numeric_limits<int>::max())) {
+      return false;
+    }
+  }
+
+  if (value <= 0) {
+    return false;
+  }
+
+  valueOut = static_cast<int>(value);
+  return true;
+}
+
+bool ParseSourcePosition(const std::string &source,
+                         SourcePosition &positionOut) {
+  const std::size_t firstColon = source.rfind(':');
+  if (firstColon == std::string::npos || firstColon + 1 >= source.size()) {
+    return false;
+  }
+
+  const std::size_t secondColon = source.rfind(':', firstColon - 1);
+  if (secondColon == std::string::npos || secondColon == 0) {
+    return false;
+  }
+
+  const std::string filePart = source.substr(0, secondColon);
+  const std::string rowPart =
+      source.substr(secondColon + 1, firstColon - secondColon - 1);
+  const std::string columnPart = source.substr(firstColon + 1);
+
+  int row = 0;
+  int column = 0;
+  if (!ParseStrictPositiveInt(rowPart, row) ||
+      !ParseStrictPositiveInt(columnPart, column)) {
+    return false;
+  }
+
+  positionOut.filePath = NormalizePath(filePart);
+  if (positionOut.filePath.empty()) {
+    return false;
+  }
+
+  positionOut.row = row;
+  positionOut.column = column;
+  return true;
+}
+
+bool ParseForwardQuery(std::string queryRaw, SourceQuery &queryOut,
+                       std::string &canonicalSourceOut, std::string &errorOut) {
+  while (!queryRaw.empty() &&
+         (queryRaw.back() == '\n' || queryRaw.back() == '\r' ||
+          std::isspace(static_cast<unsigned char>(queryRaw.back())))) {
+    queryRaw.pop_back();
+  }
+
+  std::size_t start = 0;
+  while (start < queryRaw.size() &&
+         std::isspace(static_cast<unsigned char>(queryRaw[start]))) {
+    ++start;
+  }
+  if (start > 0) {
+    queryRaw.erase(0, start);
+  }
+
+  if (queryRaw.empty()) {
+    errorOut = "query is empty";
+    return false;
+  }
+
+  const std::size_t col2 = queryRaw.rfind(':');
+  if (col2 == std::string::npos || col2 + 1 >= queryRaw.size()) {
+    errorOut = "missing :column segment";
+    return false;
+  }
+
+  const std::size_t col1 = queryRaw.rfind(':', col2 - 1);
+  if (col1 == std::string::npos || col1 == 0) {
+    errorOut = "missing :line segment";
+    return false;
+  }
+
+  std::string filePart = queryRaw.substr(0, col1);
+  std::string linePart = queryRaw.substr(col1 + 1, col2 - col1 - 1);
+  std::string columnPart = queryRaw.substr(col2 + 1);
+
+  bool lineHadPlus = false;
+  bool columnHadPlus = false;
+
+  if (!linePart.empty() && linePart.front() == '+') {
+    lineHadPlus = true;
+    linePart.erase(0, 1);
+  }
+  if (!columnPart.empty() && columnPart.front() == '+') {
+    columnHadPlus = true;
+    columnPart.erase(0, 1);
+  }
+
+  int row = 0;
+  int column = 0;
+  if (!ParseStrictPositiveInt(linePart, row) ||
+      !ParseStrictPositiveInt(columnPart, column)) {
+    errorOut = "line/column must be positive integers";
+    return false;
+  }
+
+  queryOut.position.filePath = NormalizePath(filePart);
+  if (queryOut.position.filePath.empty()) {
+    errorOut = "file path is empty";
+    return false;
+  }
+
+  queryOut.position.row = row;
+  queryOut.position.column = column;
+  queryOut.preferRightOnExact = lineHadPlus || columnHadPlus;
+
+  canonicalSourceOut = queryOut.position.filePath + ":" + std::to_string(row) +
+                       ":" + std::to_string(column);
+  return true;
+}
+
+bool TryGetFaceLabelFromEntry(const Handle(TDocStd_Document) & document,
+                              const std::string &entry, TDF_Label &labelOut) {
+  if (document.IsNull() || entry.empty()) {
+    return false;
+  }
+
+  TDF_Label label;
+  TDF_Tool::Label(document->GetData(), entry.c_str(), label, Standard_False);
+  if (label.IsNull()) {
+    return false;
+  }
+
+  labelOut = label;
+  return true;
+}
+
+void HighlightFacesForEntries(const std::vector<std::string> &entries,
+                              const Handle(TDocStd_Document) & document,
+                              const Handle(XCAFDoc_ShapeTool) & shapeTool,
+                              const Handle(AIS_InteractiveContext) & context,
+                              const Handle(V3d_View) & view,
+                              Handle(AIS_Shape) & highlightPresentation) {
+  if (context.IsNull() || view.IsNull()) {
+    return;
+  }
+
+  if (!highlightPresentation.IsNull()) {
+    context->Remove(highlightPresentation, Standard_False);
+    highlightPresentation.Nullify();
+  }
+
+  if (document.IsNull() || shapeTool.IsNull() || entries.empty()) {
+    return;
+  }
+
+  BRep_Builder builder;
+  TopoDS_Compound compound;
+  builder.MakeCompound(compound);
+
+  bool hasFaces = false;
+  for (const std::string &entry : entries) {
+    TDF_Label faceLabel;
+    if (!TryGetFaceLabelFromEntry(document, entry, faceLabel)) {
+      continue;
+    }
+
+    TopoDS_Shape faceShape;
+    if (!shapeTool->GetShape(faceLabel, faceShape) || faceShape.IsNull()) {
+      continue;
+    }
+
+    if (faceShape.ShapeType() == TopAbs_FACE) {
+      builder.Add(compound, faceShape);
+      hasFaces = true;
+      continue;
+    }
+
+    for (TopExp_Explorer exp(faceShape, TopAbs_FACE); exp.More(); exp.Next()) {
+      builder.Add(compound, exp.Current());
+      hasFaces = true;
+    }
+  }
+
+  if (!hasFaces) {
+    return;
+  }
+
+  highlightPresentation = new AIS_Shape(compound);
+  context->Display(highlightPresentation, AIS_Shaded, -1, Standard_False);
+  context->SetColor(highlightPresentation,
+                    Quantity_Color(Quantity_NOC_DODGERBLUE2), Standard_False);
+  context->SetTransparency(highlightPresentation, 0.15, Standard_False);
+  context->SetDisplayMode(highlightPresentation, AIS_Shaded, Standard_False);
+  context->UpdateCurrentViewer();
+}
+
+#ifndef _WIN32
+bool ReadSingleDatagramLine(int socketFd, std::string &lineOut) {
+  lineOut.clear();
+
+  char buffer[1024];
+  const ssize_t bytesRead = recv(socketFd, buffer, sizeof(buffer) - 1, 0);
+  if (bytesRead < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return false;
+    }
+    std::cerr << "Warning: recv() failed on forward-nav socket: "
+              << std::strerror(errno) << std::endl;
+    return false;
+  }
+
+  if (bytesRead == 0) {
+    return false;
+  }
+
+  buffer[bytesRead] = '\0';
+  lineOut.assign(buffer, static_cast<std::size_t>(bytesRead));
+  return true;
+}
+
+SockaddrUn MakeSockaddrUn(const std::filesystem::path &socketPath) {
+  SockaddrUn result;
+  result.addr.sun_family = AF_UNIX;
+
+  const std::string pathString = socketPath.string();
+  const std::size_t maxLen = sizeof(result.addr.sun_path) - 1;
+  std::strncpy(result.addr.sun_path, pathString.c_str(), maxLen);
+  result.addr.sun_path[maxLen] = '\0';
+
+  result.len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
+                                      std::strlen(result.addr.sun_path) + 1);
+  return result;
+}
+
+bool SendForwardNavigationRequest(const std::filesystem::path &socketPath,
+                                  const std::string &queryLine,
+                                  std::string &errorOut) {
+  errorOut.clear();
+
+  if (queryLine.empty()) {
+    errorOut = "query is empty";
+    return false;
+  }
+
+  const std::string socketPathString = socketPath.string();
+  if (socketPathString.size() >= sizeof(sockaddr_un::sun_path)) {
+    errorOut = "socket path is too long";
+    return false;
+  }
+
+  const int clientFd = socket(AF_UNIX, SOCK_DGRAM, 0);
+  if (clientFd < 0) {
+    errorOut = std::string("socket() failed: ") + std::strerror(errno);
+    return false;
+  }
+
+  const SockaddrUn addr = MakeSockaddrUn(socketPath);
+  const std::string payload = queryLine + "\n";
+
+  const ssize_t bytesSent =
+      sendto(clientFd, payload.data(), payload.size(), 0,
+             reinterpret_cast<const sockaddr *>(&addr.addr), addr.len);
+  const int closeRc = close(clientFd);
+  (void)closeRc;
+
+  if (bytesSent < 0) {
+    errorOut = std::string("sendto() failed: ") + std::strerror(errno);
+    return false;
+  }
+
+  return true;
+}
+#endif
+
+std::string ToCanonicalSource(const SourcePosition &position) {
+  return position.filePath + ":" + std::to_string(position.row) + ":" +
+         std::to_string(position.column);
+}
+
+void BuildForwardNavigationData(
+    const std::unordered_map<std::string, std::string> &labelSourceByEntry,
+    ForwardNavigationData &forwardNavigationData) {
+  forwardNavigationData.entryBySource.clear();
+
+  for (const auto &pair : labelSourceByEntry) {
+    SourcePosition position;
+    if (!ParseSourcePosition(pair.second, position)) {
+      continue;
+    }
+
+    forwardNavigationData.entryBySource.emplace(position, pair.first);
+  }
+}
+
+bool ResolveForwardNavigationQuery(
+    const ForwardNavigationData &forwardNavigationData,
+    const SourceQuery &query, std::string &resolvedSourceOut,
+    std::vector<std::string> &resolvedEntriesOut) {
+  resolvedSourceOut.clear();
+  resolvedEntriesOut.clear();
+
+  if (forwardNavigationData.entryBySource.empty()) {
+    return false;
+  }
+
+  const SourcePosition &queryPos = query.position;
+  const auto &entryBySource = forwardNavigationData.entryBySource;
+
+  const auto exactRange = entryBySource.equal_range(queryPos);
+  const bool hasExactMatch = exactRange.first != exactRange.second;
+
+  auto collectEntriesAt = [&](const SourcePosition &key) {
+    auto range = entryBySource.equal_range(key);
+    for (auto it = range.first; it != range.second; ++it) {
+      resolvedEntriesOut.push_back(it->second);
+    }
+    resolvedSourceOut = ToCanonicalSource(key);
+  };
+
+  if (!query.preferRightOnExact && hasExactMatch) {
+    collectEntriesAt(queryPos);
+    return !resolvedEntriesOut.empty();
+  }
+
+  if (query.preferRightOnExact) {
+    auto it = entryBySource.upper_bound(queryPos);
+    if (it != entryBySource.end() && it->first.filePath == queryPos.filePath) {
+      collectEntriesAt(it->first);
+      return !resolvedEntriesOut.empty();
+    }
+
+    if (hasExactMatch) {
+      collectEntriesAt(queryPos);
+      return !resolvedEntriesOut.empty();
+    }
+    return false;
+  }
+
+  auto lower = entryBySource.lower_bound(queryPos);
+  while (lower != entryBySource.begin()) {
+    auto prev = std::prev(lower);
+    if (prev->first.filePath != queryPos.filePath) {
+      break;
+    }
+
+    collectEntriesAt(prev->first);
+    return !resolvedEntriesOut.empty();
+  }
+
+  return false;
+}
 
 bool SplitEntryAndSourceLocation(const std::string &line, std::string &entryOut,
                                  std::string &sourceOut) {
@@ -200,16 +616,58 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
 int main(int argc, char *argv[]) {
   bool wanthelp = (argc >= 2 && (strcmp(argv[1], "--help") == 0 ||
                                  strcmp(argv[1], "-h") == 0));
-  if (argc < 2 || wanthelp) {
-    std::cout << "Usage: " << argv[0] << " <path_to_step_file.stp>"
-              << std::endl;
+  if (wanthelp || argc < 2 || argc > 3) {
+    std::cout << "Usage: " << argv[0]
+              << " <path_to_step_file.stp> [source:line:col]" << std::endl;
+    std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
     if (wanthelp) {
       std::cout
           << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
              "pan\n\tRight click to rotate\n\tESC to quit."
           << std::endl;
     }
+    return wanthelp ? 0 : 1;
+  }
+
+#ifndef _WIN32
+  const std::filesystem::path socketPath =
+      std::filesystem::current_path() / ".OCCT_XCAF_FacePicker.sock";
+#endif
+
+  std::string cliForwardQuery;
+  if (argc == 2) {
+    SourceQuery parsedQuery;
+    std::string canonicalSource;
+    std::string parseError;
+    if (ParseForwardQuery(argv[1], parsedQuery, canonicalSource, parseError)) {
+      cliForwardQuery = canonicalSource;
+    }
+  } else if (argc == 3) {
+    SourceQuery parsedQuery;
+    std::string canonicalSource;
+    std::string parseError;
+    if (!ParseForwardQuery(argv[2], parsedQuery, canonicalSource, parseError)) {
+      std::cerr << "Error: invalid forward-navigation query: " << parseError
+                << std::endl;
+      return 1;
+    }
+    cliForwardQuery = canonicalSource;
+  }
+
+  if (!cliForwardQuery.empty()) {
+#ifdef _WIN32
+    std::cerr << "Error: forward navigation IPC is not supported on Windows."
+              << std::endl;
     return 1;
+#else
+    std::string sendError;
+    if (!SendForwardNavigationRequest(socketPath, cliForwardQuery, sendError)) {
+      std::cerr << "Error: could not send forward-navigation query to "
+                << socketPath << ": " << sendError << std::endl;
+      return 1;
+    }
+    return 0;
+#endif
   }
 
   const std::filesystem::path stepPathInput(argv[1]);
@@ -314,6 +772,12 @@ int main(int argc, char *argv[]) {
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) xcafPresentation;
   std::unordered_map<std::string, std::string> labelSourceByEntry;
+  ForwardNavigationData forwardNavigationData;
+  Handle(AIS_Shape) forwardNavHighlight;
+
+#ifndef _WIN32
+  int forwardNavSocketFd = -1;
+#endif
 
   auto applyPresentationStyling = [&](const Handle(XCAFPrs_AISObject) &
                                       presentation) {
@@ -399,6 +863,7 @@ int main(int argc, char *argv[]) {
         }
       }
     }
+    BuildForwardNavigationData(labelSourceByEntry, forwardNavigationData);
 
     if (!reader.Transfer(newDoc)) {
       std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
@@ -452,6 +917,10 @@ int main(int argc, char *argv[]) {
 
     view->FitAll();
     view->ZFitAll();
+    if (!forwardNavHighlight.IsNull()) {
+      context->Remove(forwardNavHighlight, Standard_False);
+      forwardNavHighlight.Nullify();
+    }
     context->UpdateCurrentViewer();
 
     if (!oldDoc.IsNull()) {
@@ -471,6 +940,40 @@ int main(int argc, char *argv[]) {
   MouseScrollContext scrollContext;
   glfwSetWindowUserPointer(occtWindow->getGlfwWindow(), &scrollContext);
   glfwSetScrollCallback(occtWindow->getGlfwWindow(), OnMouseScroll);
+
+#ifndef _WIN32
+  {
+    std::error_code removeEc;
+    std::filesystem::remove(socketPath, removeEc);
+
+    const std::string socketPathString = socketPath.string();
+    if (socketPathString.size() >= sizeof(sockaddr_un::sun_path)) {
+      std::cerr << "Warning: forward-nav socket path is too long: "
+                << socketPath << std::endl;
+    } else {
+      forwardNavSocketFd = socket(AF_UNIX, SOCK_DGRAM, 0);
+      if (forwardNavSocketFd < 0) {
+        std::cerr << "Warning: could not create forward-nav socket "
+                  << socketPath << ": " << std::strerror(errno) << std::endl;
+      } else {
+        const int flags = fcntl(forwardNavSocketFd, F_GETFL, 0);
+        if (flags >= 0) {
+          (void)fcntl(forwardNavSocketFd, F_SETFL, flags | O_NONBLOCK);
+        }
+
+        const SockaddrUn addr = MakeSockaddrUn(socketPath);
+        if (bind(forwardNavSocketFd,
+                 reinterpret_cast<const sockaddr *>(&addr.addr),
+                 addr.len) != 0) {
+          std::cerr << "Warning: could not bind forward-nav socket "
+                    << socketPath << ": " << std::strerror(errno) << std::endl;
+          close(forwardNavSocketFd);
+          forwardNavSocketFd = -1;
+        }
+      }
+    }
+  }
+#endif
 
   dmon_init();
   dmon_watch_id watchId = dmon_watch(watchRootForDmon.c_str(),
@@ -511,6 +1014,56 @@ int main(int argc, char *argv[]) {
                   << std::endl;
       }
     }
+
+#ifndef _WIN32
+    if (forwardNavSocketFd >= 0) {
+      std::string receivedLine;
+      while (ReadSingleDatagramLine(forwardNavSocketFd, receivedLine)) {
+        SourceQuery query;
+        std::string canonicalQuerySource;
+        std::string parseError;
+        if (!ParseForwardQuery(receivedLine, query, canonicalQuerySource,
+                               parseError)) {
+          std::cerr << "Forward navigation ignored: " << parseError
+                    << " (query='" << receivedLine << "')" << std::endl;
+          continue;
+        }
+
+        std::string resolvedSource;
+        std::vector<std::string> resolvedEntries;
+        if (!ResolveForwardNavigationQuery(forwardNavigationData, query,
+                                           resolvedSource, resolvedEntries)) {
+          std::cerr << "Forward navigation: no mapped face for "
+                    << canonicalQuerySource << std::endl;
+          HighlightFacesForEntries({}, doc, shapeTool, context, view,
+                                   forwardNavHighlight);
+          continue;
+        }
+
+        HighlightFacesForEntries(resolvedEntries, doc, shapeTool, context, view,
+                                 forwardNavHighlight);
+        if (!forwardNavHighlight.IsNull()) {
+          view->FitAll();
+          view->ZFitAll();
+          context->UpdateCurrentViewer();
+        }
+
+        std::cout << "Forward navigation: " << canonicalQuerySource << " -> "
+                  << resolvedSource;
+        if (!resolvedEntries.empty()) {
+          std::cout << " [";
+          for (std::size_t i = 0; i < resolvedEntries.size(); ++i) {
+            if (i > 0) {
+              std::cout << ",";
+            }
+            std::cout << resolvedEntries[i];
+          }
+          std::cout << "]";
+        }
+        std::cout << std::endl;
+      }
+    }
+#endif
 
     glfwMakeContextCurrent(occtWindow->getGlfwWindow());
 
@@ -628,6 +1181,15 @@ int main(int argc, char *argv[]) {
     dmon_unwatch(watchId);
   }
   dmon_deinit();
+
+#ifndef _WIN32
+  if (forwardNavSocketFd >= 0) {
+    close(forwardNavSocketFd);
+    forwardNavSocketFd = -1;
+  }
+  std::error_code removeEc;
+  std::filesystem::remove(socketPath, removeEc);
+#endif
 
   if (!doc.IsNull()) {
     app->Close(doc); // calls glfwTerminate() no need to add it below

@@ -20,3 +20,22 @@ Opencascade headers `/usr/include/opencascade/XCAF*.hxx` are for metadata like c
   FILE_DESCRIPTION(('0:1:1:1:1:main.hs:9:13','0:1:1:1:2:main.hs:9:13',
       '0:1:1:1:13:main.hs:9:79','0:1:1:1:14:main.hs:9:30'),'2;1');
 ```
+
+## forward navigation
+
+The viewer manages a `.OCCT_XCAF_FacePicker.sock` fifo (creates/reads/destroys)
+The OCCT_XCAF_FacePicker executable can be used to write to that fifo to tell
+the currently running viewer to focus on face `0:1:1:1:2`:
+
+```bash
+OCCT_XCAF_FacePicker main.hs:9:13     # no match: leftwards
+OCCT_XCAF_FacePicker main.hs:+9:+13   # no match: rightwards
+OCCT_XCAF_FacePicker model.step main.hs:9:13 # also open if msising
+```
+
+## TODO
+
+OCCT faces `OCCT_XCAF_FacePicker model.step:0:1:1:1:23` possibly leaving out some components
+slow animation smooth_motion_pd.md
+without arguments open all step $(basename `pwd`).step or with numbers
+adjust highlight style to just a light border the same as when clicking
