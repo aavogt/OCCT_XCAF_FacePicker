@@ -1,17 +1,21 @@
 # OCCT_XCAF_FacePicker
 
-`f3d --watch` except left mouse clicks jump-to-definition for step files created by [aavogt/rapids](https://github.com/aavogt/rapids).
-For now [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded.
+Like `f3d --watch` with forward and reverse searching of `.STEP` files created with [aavogt/rapids](https://github.com/aavogt/rapids).
+[A 1 minute demo showing colors, reverse searching and reloading is here](https://youtu.be/NTni_7p9clE).
+
+## installation
 
 ```
-apt install libglfw3-dev cmake 'libocct-*' occt-misc g++
+apt install libglfw3-dev cmake 'libocct-*' occt-misc g++ # maybe more?
 wget https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00/raw/nvim-remote.sh
 cmake -Bbuild && cmake --build build
 # move build/OCCT_XCAF_FacePicker and nvim-remote.sh into your $PATH
 OCCT_XCAF_FacePicker model.step
 ```
 
-## jump-to-definition data
+## jump back
+
+Currently [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded. If there's interest, we could support other editors like okular does for synctex.
 
 Opencascade headers `/usr/include/opencascade/XCAF*.hxx` are for metadata like comments or tolerances. Only some some of these make it into the step file, so instead I put the map from face `0:1:1:1:1` to file `main.hs:9:13` in the FILE_DESCRIPTION
 
@@ -21,27 +25,20 @@ Opencascade headers `/usr/include/opencascade/XCAF*.hxx` are for metadata like c
       '0:1:1:1:13:main.hs:9:79','0:1:1:1:14:main.hs:9:30'),'2;1');
 ```
 
-## forward navigation
+## jump forward
 
-The viewer manages a Unix datagram socket at `.OCCT_XCAF_FacePicker.sock`
-(creates/reads/destroys it in the current working directory).
+The viewer manages `.OCCT_XCAF_FacePicker.sock`. It creates/reads/destroys it in the current working directory where we expect to have the `.step` and `.hs` files.
 
-The `OCCT_XCAF_FacePicker` executable can send a source-location query to the
-currently running viewer:
+The `OCCT_XCAF_FacePicker` executable can be used to write the socket with the
+hs source-location query:
 
 ```bash
 OCCT_XCAF_FacePicker main.hs:9:13           # no exact match: search leftwards
 OCCT_XCAF_FacePicker main.hs:+9:+13         # no exact match: search rightwards
-OCCT_XCAF_FacePicker model.step main.hs:9:13
+OCCT_XCAF_FacePicker model.step main.hs:9:13 # open the viewer if necessary
+OCCT_XCAF_FacePicker model.step:0:1:1:1:2   # TODO
 ```
 
 For the `model.step + query` form, if sending fails with socket-not-available
 errors (`ENOENT` / `ECONNREFUSED`), the app falls back to opening the viewer
 for `model.step` and applying the query locally.
-
-## TODO
-
-OCCT faces `OCCT_XCAF_FacePicker model.step:0:1:1:1:23` possibly leaving out some components
-slow animation smooth_motion_pd.md
-without arguments open all step $(basename `pwd`).step or with numbers
-adjust highlight style to just a light border the same as when clicking
