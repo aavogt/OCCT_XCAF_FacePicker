@@ -562,6 +562,8 @@ void OnMouseScroll(GLFWwindow *window, double, double yoffset) {
   scrollContext->deltaY += yoffset;
 }
 
+static bool dirty = true;
+
 void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
                         const char *filepath, const char *oldfilepath,
                         void *user) {
@@ -587,6 +589,7 @@ void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
   if (matchesWatchedFile(filepath) || matchesWatchedFile(oldfilepath)) {
     watchContext->reloadRequested->store(true, std::memory_order_release);
   }
+  dirty = true;
 }
 
 bool LaunchNvimRemote(const std::string &sourceLocation) {
@@ -1140,6 +1143,7 @@ int main(int argc, char *argv[]) {
       // Rotate(x,y,...)
       view->Rotate(dx * 0.005, -dy * 0.005, 0.0,
                    wasRightPressed ? Standard_False : Standard_True);
+      dirty = true;
     }
 
     // Middle mouse drag: pan/translate camera.
@@ -1154,6 +1158,7 @@ int main(int argc, char *argv[]) {
       const Standard_Real dyView = view->Convert((Standard_Integer)-dy);
       view->Panning(dxView, dyView, 1.0,
                     wasMiddlePressed ? Standard_False : Standard_True);
+      dirty = true;
     }
 
     // Left click: select/detect face.
@@ -1197,13 +1202,18 @@ int main(int argc, char *argv[]) {
         }
         std::cout << std::endl;
       }
+      dirty = true;
     }
 
     wasLeftPressed = isLeftPressed;
     wasRightPressed = isRightPressed;
+    dirty = false;
     wasMiddlePressed = isMiddlePressed;
 
-    view->Redraw();
+    if (dirty) {
+      view->Redraw();
+      dirty = false;
+    }
   }
 
   if (watchId.id != 0) {
