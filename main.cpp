@@ -345,12 +345,6 @@ void HighlightFacesForEntries(const std::vector<std::string> &entries,
     return;
   }
 
-  highlightPresentation = new AIS_Shape(compound);
-  context->Display(highlightPresentation, AIS_Shaded, -1, Standard_False);
-  context->SetColor(highlightPresentation,
-                    Quantity_Color(Quantity_NOC_DODGERBLUE2), Standard_False);
-  context->SetTransparency(highlightPresentation, 0.15, Standard_False);
-  context->SetDisplayMode(highlightPresentation, AIS_Shaded, Standard_False);
   context->UpdateCurrentViewer();
 }
 
