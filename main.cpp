@@ -556,7 +556,11 @@ void OnMouseScroll(GLFWwindow *window, double, double yoffset) {
   scrollContext->deltaY += yoffset;
 }
 
-static bool dirty = true;
+static std::atomic_bool dirty{true};
+
+void OnWindowRefresh(GLFWwindow *) {
+  dirty.store(true, std::memory_order_release);
+}
 
 void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
                         const char *filepath, const char *oldfilepath,
@@ -958,6 +962,7 @@ int main(int argc, char *argv[]) {
   MouseScrollContext scrollContext;
   glfwSetWindowUserPointer(occtWindow->getGlfwWindow(), &scrollContext);
   glfwSetScrollCallback(occtWindow->getGlfwWindow(), OnMouseScroll);
+  glfwSetWindowRefreshCallback(occtWindow->getGlfwWindow(), OnWindowRefresh);
 
 #ifndef _WIN32
   {
@@ -1101,6 +1106,7 @@ int main(int argc, char *argv[]) {
       view->MustBeResized();
       lastFbWidth = fbWidth;
       lastFbHeight = fbHeight;
+      dirty = true;
     }
 
     double mouseX = 0.0, mouseY = 0.0;
@@ -1111,6 +1117,7 @@ int main(int argc, char *argv[]) {
           (Standard_Real)std::pow(1.12, scrollContext.deltaY);
       view->SetZoom(zoomFactor, Standard_True);
       scrollContext.deltaY = 0.0;
+      dirty = true;
     }
 
     context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
@@ -1201,12 +1208,10 @@ int main(int argc, char *argv[]) {
 
     wasLeftPressed = isLeftPressed;
     wasRightPressed = isRightPressed;
-    dirty = false;
     wasMiddlePressed = isMiddlePressed;
 
-    if (dirty) {
+    if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();
-      dirty = false;
     }
   }
 
