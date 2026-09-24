@@ -81,16 +81,21 @@
 #include <XCAFPrs_AISObject.hxx>
 
 // Modeling & Structural Helpers
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Quantity_Color.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 
 namespace {
 std::string NormalizePath(std::string path) {
@@ -688,6 +693,55 @@ bool ParseCameraState(const std::string &text, CameraState &stateOut) {
   }
   return !stateOut.hasScreenPoint ||
          ParseCameraPoint(screenPoint, stateOut.screenX, stateOut.screenY);
+}
+
+bool FindMouseRayHit(const Handle(V3d_View) & view,
+                     const Standard_Integer mouseX,
+                     const Standard_Integer mouseY, const TopoDS_Shape &shape,
+                     gp_Pnt &hitPoint) {
+  if (view.IsNull() || shape.IsNull()) {
+    return false;
+  }
+
+  Standard_Real projectedX = 0.0;
+  Standard_Real projectedY = 0.0;
+  Standard_Real projectedZ = 0.0;
+  Standard_Real rayX = 0.0;
+  Standard_Real rayY = 0.0;
+  Standard_Real rayZ = 0.0;
+  view->ConvertWithProj(mouseX, mouseY, projectedX, projectedY, projectedZ,
+                        rayX, rayY, rayZ);
+
+  Standard_Real eyeX = 0.0;
+  Standard_Real eyeY = 0.0;
+  Standard_Real eyeZ = 0.0;
+  view->Eye(eyeX, eyeY, eyeZ);
+  const gp_Pnt rayOrigin(eyeX, eyeY, eyeZ);
+  const gp_Vec projectedRay(rayOrigin,
+                            gp_Pnt(projectedX, projectedY, projectedZ));
+  gp_Vec rayDirection(rayX, rayY, rayZ);
+  if (rayDirection.SquareMagnitude() <= gp::Resolution()) {
+    return false;
+  }
+  if (rayDirection.Dot(projectedRay) < 0.0) {
+    rayDirection.Reverse();
+  }
+
+  BRepIntCurveSurface_Inter inter;
+  inter.Init(shape, gp_Lin(rayOrigin, gp_Dir(rayDirection)), 1.0e-7);
+
+  Standard_Real closestDistance = std::numeric_limits<Standard_Real>::max();
+  bool found = false;
+  for (; inter.More(); inter.Next()) {
+    const gp_Vec fromEye(rayOrigin, inter.Pnt());
+    const Standard_Real distance = fromEye.Dot(rayDirection);
+    if (distance >= 0.0 && distance < closestDistance) {
+      closestDistance = distance;
+      hitPoint = inter.Pnt();
+      found = true;
+    }
+  }
+  return found;
 }
 
 std::string SerializeCameraState(const Handle(V3d_View) & view) {
@@ -1396,18 +1450,39 @@ int main(int argc, char *argv[]) {
           }
 
           const TopoDS_Vertex pickedVertex = TopoDS::Vertex(pickedShape);
-          TDF_Label targetVertexLabel;
-          if (!shapeTool->FindSubShape(rootLabel, pickedVertex,
-                                       targetVertexLabel)) {
-            // fails for a vertex
-            // there must be another way to get the sub-shape reference
-            // continue;
+          TopoDS_Shape rootShape;
+          if (!shapeTool->GetShape(rootLabel, rootShape) ||
+              rootShape.IsNull()) {
+            continue;
           }
 
-          TCollection_AsciiString pickedEntry;
-          TDF_Tool::Entry(targetVertexLabel, pickedEntry);
-          const std::string pickedEntryStr = pickedEntry.ToCString();
+          TopTools_IndexedMapOfShape vertexMap;
+          TopExp::MapShapes(rootShape, TopAbs_VERTEX, vertexMap);
+          Standard_Integer vertexIndex = vertexMap.FindIndex(pickedVertex);
+          if (vertexIndex == 0) {
+            for (Standard_Integer i = 1; i <= vertexMap.Extent(); ++i) {
+              if (vertexMap(i).IsSame(pickedVertex)) {
+                vertexIndex = i;
+                break;
+              }
+            }
+          }
+          if (vertexIndex == 0) {
+            continue;
+          }
+
+          TCollection_AsciiString rootEntry;
+          TDF_Tool::Entry(rootLabel, rootEntry);
+          const std::string pickedEntryStr =
+              std::string(rootEntry.ToCString()) + ":v" +
+              std::to_string(vertexIndex);
           const gp_Pnt vertexPoint = BRep_Tool::Pnt(pickedVertex);
+          gp_Pnt stabPoint;
+          if (!FindMouseRayHit(view, (Standard_Integer)mouseX,
+                               (Standard_Integer)mouseY, rootShape,
+                               stabPoint)) {
+            continue;
+          }
           Standard_Real screenX = 0.0;
           Standard_Real screenY = 0.0;
           view->Project(vertexPoint.X(), vertexPoint.Y(), vertexPoint.Z(),
@@ -1415,12 +1490,12 @@ int main(int argc, char *argv[]) {
           const std::string modelEntry =
               std::filesystem::path(stepPathForOcct).filename().string() + ":" +
               pickedEntryStr;
-          std::cout << modelEntry << " stab:" << std::setprecision(17)
-                    << vertexPoint.X() << ',' << vertexPoint.Y() << ','
-                    << vertexPoint.Z() << ' '
+          std::cout << modelEntry << " snap:" << vertexPoint.X() << ','
+                    << vertexPoint.Y() << ',' << vertexPoint.Z()
+                    << " stab:" << std::setprecision(17) << stabPoint.X() << ','
+                    << stabPoint.Y() << ',' << stabPoint.Z() << ' '
                     << SerializeCameraReplay(view, screenX, screenY)
-                    << " snap:" << vertexPoint.X() << ',' << vertexPoint.Y()
-                    << ',' << vertexPoint.Z() << std::endl;
+                    << std::endl;
           continue;
         }
 
