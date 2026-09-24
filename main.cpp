@@ -853,7 +853,9 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
     std::cout << "       " << argv[0]
               << "                 (open <directory-name>*.step)" << std::endl;
-    std::cout << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
+    std::cout << "\tLeft click to jump with nvim-remote.sh\n"
+                 "\tShift-left click to print the vertex query to stdout\n"
+                 "\tMiddle click to "
                  "pan\n\tRight click to rotate\n\tESC to quit."
               << std::endl;
     return 0;
