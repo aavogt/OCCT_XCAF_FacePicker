@@ -17,6 +17,9 @@
 #include <system_error>
 #include <unordered_map>
 #include <vector>
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -119,10 +122,22 @@ struct SourcePosition {
   int column = 0;
 };
 
+struct CameraState {
+  Standard_Real eyeX = 0.0;
+  Standard_Real eyeY = 0.0;
+  Standard_Real eyeZ = 0.0;
+  Standard_Real atX = 0.0;
+  Standard_Real atY = 0.0;
+  Standard_Real atZ = 0.0;
+  Standard_Real upX = 0.0;
+  Standard_Real upY = 0.0;
+  Standard_Real upZ = 0.0;
+};
 struct SourceQuery {
   SourcePosition position;
   bool preferRightOnExact = false;
 };
+
 
 struct SourcePositionLess {
   bool operator()(const SourcePosition &lhs, const SourcePosition &rhs) const {
@@ -600,7 +615,6 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
   if (sourceLocation.empty()) {
     return false;
   }
-
   signal(SIGINT, SIG_DFL);
   pid_t pid = fork();
   if (pid < 0) {
@@ -608,7 +622,6 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
               << std::endl;
     return false;
   }
-
   if (pid == 0) {
     if (daemon(1, 0) < 0) {
       perror("daemon");
@@ -619,9 +632,61 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
     execvp(args[0], args);
     _exit(127);
   }
-
   return true;
 #endif
+}
+
+bool ParseCameraVector(const std::string &text, Standard_Real &x,
+                       Standard_Real &y, Standard_Real &z) {
+  std::istringstream values(text);
+  char comma1 = '\0';
+  char comma2 = '\0';
+  if (!(values >> x >> comma1 >> y >> comma2 >> z) || comma1 != ',' ||
+      comma2 != ',') {
+    return false;
+  }
+  values >> std::ws;
+  return values.eof() && std::isfinite(x) && std::isfinite(y) &&
+         std::isfinite(z);
+}
+
+bool ParseCameraState(const std::string &text, CameraState &stateOut) {
+  std::istringstream vectors(text);
+  std::string eye;
+  std::string at;
+  std::string up;
+  std::string extra;
+  if (!std::getline(vectors, eye, ':') || !std::getline(vectors, at, ':') ||
+      !std::getline(vectors, up, ':')) {
+    return false;
+  }
+  if (std::getline(vectors, extra, ':')) {
+    return false;
+  }
+  return ParseCameraVector(eye, stateOut.eyeX, stateOut.eyeY, stateOut.eyeZ) &&
+         ParseCameraVector(at, stateOut.atX, stateOut.atY, stateOut.atZ) &&
+         ParseCameraVector(up, stateOut.upX, stateOut.upY, stateOut.upZ);
+}
+
+std::string SerializeCameraState(const Handle(V3d_View) &view) {
+  Standard_Real eyeX = 0.0, eyeY = 0.0, eyeZ = 0.0;
+  Standard_Real atX = 0.0, atY = 0.0, atZ = 0.0;
+  Standard_Real upX = 0.0, upY = 0.0, upZ = 0.0;
+  view->Eye(eyeX, eyeY, eyeZ);
+  view->At(atX, atY, atZ);
+  view->Up(upX, upY, upZ);
+  std::ostringstream result;
+  result << std::setprecision(17) << eyeX << ',' << eyeY << ',' << eyeZ
+         << ':' << atX << ',' << atY << ',' << atZ << ':' << upX << ','
+         << upY << ',' << upZ;
+  return result.str();
+}
+
+void ApplyCameraState(const Handle(V3d_View) &view, const CameraState &state) {
+  view->SetEye(state.eyeX, state.eyeY, state.eyeZ);
+  view->SetAt(state.atX, state.atY, state.atZ);
+  view->SetUp(state.upX, state.upY, state.upZ);
+  view->Redraw();
 }
 bool LaunchMatchingStepViewers(const char *programName) {
   const std::filesystem::path workingDirectory =
@@ -697,7 +762,9 @@ int main(int argc, char *argv[]) {
                                  strcmp(argv[1], "-h") == 0));
   if (wanthelp) {
     std::cout << "Usage: " << argv[0]
-              << " <path_to_step_file.stp> [source:line:col]" << std::endl;
+              << " <path_to_step_file.stp> [source:line:col] "
+                 "[camera_position:[camera_target:[camera_up]]]"
+              << std::endl;
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
     std::cout << "       " << argv[0]
               << "                 (open <directory-name>*.step)" << std::endl;
@@ -710,28 +777,30 @@ int main(int argc, char *argv[]) {
   if (argc == 1) {
     return LaunchMatchingStepViewers(argv[0]) ? 0 : 1;
   }
-  if (argc > 3) {
+  if (argc > 4) {
     std::cout << "Usage: " << argv[0]
-              << " <path_to_step_file.stp> [source:line:col]" << std::endl;
-    std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
+              << " <path_to_step_file.stp> [source:line:col] "
+                 "[camera_position:[camera_target:[camera_up]]]"
+              << std::endl;
     return 1;
   }
-
 
 #ifndef _WIN32
   const std::filesystem::path socketPath =
       std::filesystem::current_path() / ".OCCT_XCAF_FacePicker.sock";
 #endif
 
+  CameraState cameraState;
+  bool hasCameraState = false;
   std::string cliForwardQuery;
-  if (argc == 2) {
-    SourceQuery parsedQuery;
-    std::string canonicalSource;
-    std::string parseError;
-    if (ParseForwardQuery(argv[1], parsedQuery, canonicalSource, parseError)) {
-      cliForwardQuery = canonicalSource;
+  if (argc == 4) {
+    if (!ParseCameraState(argv[3], cameraState)) {
+      std::cerr << "Error: invalid camera state; expected "
+                   "x,y,z:x,y,z:x,y,z"
+                << std::endl;
+      return 1;
     }
-  } else if (argc == 3) {
+    hasCameraState = true;
     SourceQuery parsedQuery;
     std::string canonicalSource;
     std::string parseError;
@@ -741,6 +810,21 @@ int main(int argc, char *argv[]) {
       return 1;
     }
     cliForwardQuery = canonicalSource;
+  } else if (argc == 3 && ParseCameraState(argv[2], cameraState)) {
+    hasCameraState = true;
+  } else if (argc == 2 || argc == 3) {
+    SourceQuery parsedQuery;
+    std::string canonicalSource;
+    std::string parseError;
+    const char *queryArgument = argc == 2 ? argv[1] : argv[2];
+    if (ParseForwardQuery(queryArgument, parsedQuery, canonicalSource,
+                          parseError)) {
+      cliForwardQuery = canonicalSource;
+    } else if (argc == 3) {
+      std::cerr << "Error: invalid camera state or forward-navigation query: "
+                << parseError << std::endl;
+      return 1;
+    }
   }
 
   if (!cliForwardQuery.empty()) {
@@ -758,7 +842,7 @@ int main(int argc, char *argv[]) {
 
     const bool socketUnavailable =
         (sendErrno == ENOENT || sendErrno == ECONNREFUSED);
-    if (argc == 3 && socketUnavailable) {
+    if (argc >= 3 && socketUnavailable) {
       std::cerr << "Forward navigation socket unavailable; opening viewer for "
                 << argv[1] << " and applying query locally." << std::endl;
     } else {
@@ -1086,6 +1170,7 @@ int main(int argc, char *argv[]) {
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
   bool wasMiddlePressed = false;
+  bool wasSpacePressed = false;
 
   double rotateStartX = 0.0;
   double rotateStartY = 0.0;
@@ -1142,13 +1227,22 @@ int main(int argc, char *argv[]) {
     std::cout << std::endl;
   };
 
-  if (argc == 3 && !cliForwardQuery.empty()) {
+  if (!cliForwardQuery.empty()) {
     applyForwardNavigationQuery(cliForwardQuery);
+  }
+  if (hasCameraState) {
+    ApplyCameraState(view, cameraState);
   }
 
   // 3. Event/render loop
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
     glfwPollEvents();
+
+    const bool isSpacePressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
+    if (isSpacePressed && !wasSpacePressed) {
+      std::cout << SerializeCameraState(view) << std::endl;
+    }
 
     if (glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_ESCAPE) ==
         GLFW_PRESS) {
@@ -1286,6 +1380,7 @@ int main(int argc, char *argv[]) {
     wasLeftPressed = isLeftPressed;
     wasRightPressed = isRightPressed;
     wasMiddlePressed = isMiddlePressed;
+    wasSpacePressed = isSpacePressed;
 
     if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();

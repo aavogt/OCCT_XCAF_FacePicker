@@ -13,6 +13,20 @@ cmake -Bbuild && cmake --build build
 OCCT_XCAF_FacePicker model.step
 ```
 
+Press Space in the viewer to print a camera state in copy/paste form:
+
+```text
+eye_x,eye_y,eye_z:target_x,target_y,target_z:up_x,up_y,up_z
+```
+
+Pass that value as the final argument to restore the camera. The source query
+remains optional:
+
+```bash
+OCCT_XCAF_FacePicker model.step 1.23,34.5,3:0,0,0:0,1,0
+OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
+```
+
 ## jump back
 
 Currently [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded. If there's interest, we could support other editors like okular does for synctex.
