@@ -6,20 +6,20 @@
 #include <cmath>
 #include <csignal>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
 #include <vector>
-#include <cstdlib>
-#include <iomanip>
-#include <sstream>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -82,12 +82,15 @@
 
 // Modeling & Structural Helpers
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <Quantity_Color.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+
+#include <gp_Pnt.hxx>
 
 namespace {
 std::string NormalizePath(std::string path) {
@@ -132,12 +135,14 @@ struct CameraState {
   Standard_Real upX = 0.0;
   Standard_Real upY = 0.0;
   Standard_Real upZ = 0.0;
+  bool hasScreenPoint = false;
+  Standard_Real screenX = 0.0;
+  Standard_Real screenY = 0.0;
 };
 struct SourceQuery {
   SourcePosition position;
   bool preferRightOnExact = false;
 };
-
 
 struct SourcePositionLess {
   bool operator()(const SourcePosition &lhs, const SourcePosition &rhs) const {
@@ -650,25 +655,42 @@ bool ParseCameraVector(const std::string &text, Standard_Real &x,
          std::isfinite(z);
 }
 
+bool ParseCameraPoint(const std::string &text, Standard_Real &x,
+                      Standard_Real &y) {
+  std::istringstream values(text);
+  char comma = '\0';
+  if (!(values >> x >> comma >> y) || comma != ',') {
+    return false;
+  }
+  values >> std::ws;
+  return values.eof() && std::isfinite(x) && std::isfinite(y);
+}
+
 bool ParseCameraState(const std::string &text, CameraState &stateOut) {
   std::istringstream vectors(text);
   std::string eye;
   std::string at;
   std::string up;
-  std::string extra;
+  std::string screenPoint;
   if (!std::getline(vectors, eye, ':') || !std::getline(vectors, at, ':') ||
       !std::getline(vectors, up, ':')) {
     return false;
   }
-  if (std::getline(vectors, extra, ':')) {
+  stateOut.hasScreenPoint =
+      static_cast<bool>(std::getline(vectors, screenPoint, ':'));
+  if (stateOut.hasScreenPoint && std::getline(vectors, screenPoint, ':')) {
     return false;
   }
-  return ParseCameraVector(eye, stateOut.eyeX, stateOut.eyeY, stateOut.eyeZ) &&
-         ParseCameraVector(at, stateOut.atX, stateOut.atY, stateOut.atZ) &&
-         ParseCameraVector(up, stateOut.upX, stateOut.upY, stateOut.upZ);
+  if (!ParseCameraVector(eye, stateOut.eyeX, stateOut.eyeY, stateOut.eyeZ) ||
+      !ParseCameraVector(at, stateOut.atX, stateOut.atY, stateOut.atZ) ||
+      !ParseCameraVector(up, stateOut.upX, stateOut.upY, stateOut.upZ)) {
+    return false;
+  }
+  return !stateOut.hasScreenPoint ||
+         ParseCameraPoint(screenPoint, stateOut.screenX, stateOut.screenY);
 }
 
-std::string SerializeCameraState(const Handle(V3d_View) &view) {
+std::string SerializeCameraState(const Handle(V3d_View) & view) {
   Standard_Real eyeX = 0.0, eyeY = 0.0, eyeZ = 0.0;
   Standard_Real atX = 0.0, atY = 0.0, atZ = 0.0;
   Standard_Real upX = 0.0, upY = 0.0, upZ = 0.0;
@@ -676,13 +698,22 @@ std::string SerializeCameraState(const Handle(V3d_View) &view) {
   view->At(atX, atY, atZ);
   view->Up(upX, upY, upZ);
   std::ostringstream result;
-  result << std::setprecision(17) << eyeX << ',' << eyeY << ',' << eyeZ
-         << ':' << atX << ',' << atY << ',' << atZ << ':' << upX << ','
-         << upY << ',' << upZ;
+  result << std::setprecision(17) << eyeX << ',' << eyeY << ',' << eyeZ << ':'
+         << atX << ',' << atY << ',' << atZ << ':' << upX << ',' << upY << ','
+         << upZ;
   return result.str();
 }
 
-void ApplyCameraState(const Handle(V3d_View) &view, const CameraState &state) {
+std::string SerializeCameraReplay(const Handle(V3d_View) & view,
+                                  const Standard_Real screenX,
+                                  const Standard_Real screenY) {
+  std::ostringstream result;
+  result << SerializeCameraState(view) << ':' << std::setprecision(17)
+         << screenX << ',' << screenY;
+  return result.str();
+}
+
+void ApplyCameraState(const Handle(V3d_View) & view, const CameraState &state) {
   view->SetEye(state.eyeX, state.eyeY, state.eyeZ);
   view->SetAt(state.atX, state.atY, state.atZ);
   view->SetUp(state.upX, state.upY, state.upZ);
@@ -768,10 +799,9 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
     std::cout << "       " << argv[0]
               << "                 (open <directory-name>*.step)" << std::endl;
-    std::cout
-        << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
-           "pan\n\tRight click to rotate\n\tESC to quit."
-        << std::endl;
+    std::cout << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
+                 "pan\n\tRight click to rotate\n\tESC to quit."
+              << std::endl;
     return 0;
   }
   if (argc == 1) {
@@ -1170,6 +1200,7 @@ int main(int argc, char *argv[]) {
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
   bool wasMiddlePressed = false;
+  bool wasShiftPressed = false;
   bool wasSpacePressed = false;
 
   double rotateStartX = 0.0;
@@ -1291,6 +1322,16 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
+    const bool isShiftPressed = glfwGetKey(occtWindow->getGlfwWindow(),
+                                           GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                                glfwGetKey(occtWindow->getGlfwWindow(),
+                                           GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    if (isShiftPressed != wasShiftPressed) {
+      context->SetSelectionModeActive(xcafPresentation, 4, !isShiftPressed);
+      context->SetSelectionModeActive(xcafPresentation, 1, isShiftPressed);
+      context->UpdateCurrentViewer();
+    }
+
     context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
                     Standard_True);
 
@@ -1333,7 +1374,7 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
-    // Left click: select/detect face.
+    // Left click selects a face; Shift-left-click selects a vertex.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
         !isMiddlePressed) {
       context->SelectDetected();
@@ -1349,6 +1390,40 @@ int main(int argc, char *argv[]) {
         }
 
         TopoDS_Shape pickedShape = brepOwner->Shape();
+        if (wasShiftPressed || isShiftPressed) {
+          if (pickedShape.ShapeType() != TopAbs_VERTEX) {
+            continue;
+          }
+
+          const TopoDS_Vertex pickedVertex = TopoDS::Vertex(pickedShape);
+          TDF_Label targetVertexLabel;
+          if (!shapeTool->FindSubShape(rootLabel, pickedVertex,
+                                       targetVertexLabel)) {
+            // fails for a vertex
+            // there must be another way to get the sub-shape reference
+            // continue;
+          }
+
+          TCollection_AsciiString pickedEntry;
+          TDF_Tool::Entry(targetVertexLabel, pickedEntry);
+          const std::string pickedEntryStr = pickedEntry.ToCString();
+          const gp_Pnt vertexPoint = BRep_Tool::Pnt(pickedVertex);
+          Standard_Real screenX = 0.0;
+          Standard_Real screenY = 0.0;
+          view->Project(vertexPoint.X(), vertexPoint.Y(), vertexPoint.Z(),
+                        screenX, screenY);
+          const std::string modelEntry =
+              std::filesystem::path(stepPathForOcct).filename().string() + ":" +
+              pickedEntryStr;
+          std::cout << modelEntry << " stab:" << std::setprecision(17)
+                    << vertexPoint.X() << ',' << vertexPoint.Y() << ','
+                    << vertexPoint.Z() << ' '
+                    << SerializeCameraReplay(view, screenX, screenY)
+                    << " snap:" << vertexPoint.X() << ',' << vertexPoint.Y()
+                    << ',' << vertexPoint.Z() << std::endl;
+          continue;
+        }
+
         if (pickedShape.ShapeType() != TopAbs_FACE) {
           continue;
         }
@@ -1381,6 +1456,7 @@ int main(int argc, char *argv[]) {
     wasRightPressed = isRightPressed;
     wasMiddlePressed = isMiddlePressed;
     wasSpacePressed = isSpacePressed;
+    wasShiftPressed = isShiftPressed;
 
     if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();

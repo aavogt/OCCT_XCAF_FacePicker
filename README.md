@@ -27,6 +27,13 @@ OCCT_XCAF_FacePicker model.step 1.23,34.5,3:0,0,0:0,1,0
 OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
 ```
 
+Shift-left-click a vertex to print its STEP entry, the vertex coordinates,
+the camera replay string, and a snap coordinate:
+
+```text
+model.step:0:1:1:1:23 stab:1.23,2.34,5.67 eye:target:up:x,y snap:1.23,2.34,5.67
+```
+
 ## jump back
 
 Currently [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded. If there's interest, we could support other editors like okular does for synctex.
