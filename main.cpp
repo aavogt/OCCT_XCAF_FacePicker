@@ -1495,7 +1495,8 @@ int main(int argc, char *argv[]) {
           std::cout << modelEntry << " snap:" << vertexPoint.X() << ','
                     << vertexPoint.Y() << ',' << vertexPoint.Z()
                     << " stab:" << std::setprecision(17) << stabPoint.X() << ','
-                    << stabPoint.Y() << ',' << stabPoint.Z() << ' '
+                    << stabPoint.Y() << ',' << stabPoint.Z()
+                    << " mouse:" << mouseX << "," << mouseY << ' '
                     << SerializeCameraReplay(view, screenX, screenY)
                     << std::endl;
           continue;
