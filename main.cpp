@@ -623,23 +623,100 @@ bool LaunchNvimRemote(const std::string &sourceLocation) {
   return true;
 #endif
 }
+bool LaunchMatchingStepViewers(const char *programName) {
+  const std::filesystem::path workingDirectory =
+      std::filesystem::current_path();
+  const std::string prefix = workingDirectory.filename().string();
+  std::vector<std::filesystem::path> stepFiles;
+  std::error_code directoryError;
+  for (const std::filesystem::directory_entry &entry :
+       std::filesystem::directory_iterator(workingDirectory, directoryError)) {
+    if (directoryError) {
+      break;
+    }
+    if (!entry.is_regular_file(directoryError) || directoryError) {
+      directoryError.clear();
+      continue;
+    }
+
+    const std::string filename = entry.path().filename().string();
+    if (filename.compare(0, prefix.size(), prefix) == 0 &&
+        entry.path().extension() == ".step") {
+      stepFiles.push_back(entry.path().lexically_normal());
+    }
+  }
+
+  if (directoryError) {
+    std::cerr << "Error: could not enumerate " << workingDirectory << ": "
+              << directoryError.message() << std::endl;
+    return false;
+  }
+
+  std::sort(stepFiles.begin(), stepFiles.end());
+  if (stepFiles.empty()) {
+    std::cerr << "Error: no STEP files matching " << prefix << "*.step in "
+              << workingDirectory << std::endl;
+    return false;
+  }
+
+#ifdef _WIN32
+  std::cerr << "Error: opening multiple STEP viewers without arguments is "
+               "not supported on Windows."
+            << std::endl;
+  return false;
+#else
+  for (const std::filesystem::path &stepFile : stepFiles) {
+    const pid_t child = fork();
+    if (child < 0) {
+      std::cerr << "Error: could not launch viewer for " << stepFile << ": "
+                << std::strerror(errno) << std::endl;
+      return false;
+    }
+    if (child == 0) {
+      char *childArguments[] = {
+          const_cast<char *>(programName),
+          const_cast<char *>(stepFile.c_str()),
+          nullptr,
+      };
+      execvp(programName, childArguments);
+      std::cerr << "Error: could not open " << stepFile << ": "
+                << std::strerror(errno) << std::endl;
+      _exit(127);
+    }
+    std::cout << "Opening " << stepFile << " (reloads independently)."
+              << std::endl;
+  }
+  return true;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
   bool wanthelp = (argc >= 2 && (strcmp(argv[1], "--help") == 0 ||
                                  strcmp(argv[1], "-h") == 0));
-  if (wanthelp || argc < 2 || argc > 3) {
+  if (wanthelp) {
     std::cout << "Usage: " << argv[0]
               << " <path_to_step_file.stp> [source:line:col]" << std::endl;
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
-    if (wanthelp) {
-      std::cout
-          << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
-             "pan\n\tRight click to rotate\n\tESC to quit."
-          << std::endl;
-    }
-    return wanthelp ? 0 : 1;
+    std::cout << "       " << argv[0]
+              << "                 (open <directory-name>*.step)" << std::endl;
+    std::cout
+        << "\tLeft click to jump with nvim-remote.sh\n\tMiddle click to "
+           "pan\n\tRight click to rotate\n\tESC to quit."
+        << std::endl;
+    return 0;
   }
+  if (argc == 1) {
+    return LaunchMatchingStepViewers(argv[0]) ? 0 : 1;
+  }
+  if (argc > 3) {
+    std::cout << "Usage: " << argv[0]
+              << " <path_to_step_file.stp> [source:line:col]" << std::endl;
+    std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
+    return 1;
+  }
+
 
 #ifndef _WIN32
   const std::filesystem::path socketPath =
