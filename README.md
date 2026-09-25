@@ -57,8 +57,8 @@ hs source-location query:
 OCCT_XCAF_FacePicker main.hs:9:13           # no exact match: search leftwards
 OCCT_XCAF_FacePicker main.hs:+9:+13         # no exact match: search rightwards
 OCCT_XCAF_FacePicker model.step main.hs:9:13 # open the viewer if necessary
-OCCT_XCAF_FacePicker model.step:0:1:1:1:2   # TODO
-```
+OCCT_XCAF_FacePicker model.step:0:1:1:1:v6   # print the vertex snap
+OCCT_XCAF_FacePicker 'model.step mouse:480,116 eye:at:up:screen'
 
 For the `model.step + query` form, if sending fails with socket-not-available
 errors (`ENOENT` / `ECONNREFUSED`), the app falls back to opening the viewer

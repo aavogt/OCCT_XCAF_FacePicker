@@ -144,6 +144,18 @@ struct CameraState {
   Standard_Real screenX = 0.0;
   Standard_Real screenY = 0.0;
 };
+struct VertexReplayQuery {
+  std::string modelPath;
+  Standard_Integer vertexIndex = 0;
+};
+
+struct MouseReplayQuery {
+  std::string modelPath;
+  Standard_Integer mouseX = 0;
+  Standard_Integer mouseY = 0;
+  CameraState camera;
+};
+
 struct SourceQuery {
   SourcePosition position;
   bool preferRightOnExact = false;
@@ -301,6 +313,49 @@ bool ParseForwardQuery(std::string queryRaw, SourceQuery &queryOut,
   canonicalSourceOut = queryOut.position.filePath + ":" + std::to_string(row) +
                        ":" + std::to_string(column);
   return true;
+}
+
+bool ParseVertexReplayQuery(const std::string &queryRaw,
+                            VertexReplayQuery &queryOut) {
+  std::string query = queryRaw;
+  while (!query.empty() && std::isspace(static_cast<unsigned char>(query.back()))) {
+    query.pop_back();
+  }
+  const std::size_t firstNonSpace = query.find_first_not_of(" \t\n\r");
+  if (firstNonSpace == std::string::npos) {
+    return false;
+  }
+  if (firstNonSpace > 0) {
+    query.erase(0, firstNonSpace);
+  }
+
+  const std::size_t vertexMarker = query.rfind(":v");
+  if (vertexMarker == std::string::npos || vertexMarker + 2 >= query.size()) {
+    return false;
+  }
+
+  int vertexIndex = 0;
+  if (!ParseStrictPositiveInt(std::string_view(query).substr(vertexMarker + 2),
+                              vertexIndex)) {
+    return false;
+  }
+
+  const std::size_t entrySeparator = query.find(":0:");
+  if (entrySeparator == std::string::npos || entrySeparator == 0 ||
+      entrySeparator >= vertexMarker) {
+    return false;
+  }
+
+  const std::string modelPath = query.substr(0, entrySeparator);
+  const std::string entry = query.substr(entrySeparator + 1,
+                                         vertexMarker - entrySeparator - 1);
+  if (entry.size() < 2 || entry.compare(0, 2, "0:") != 0) {
+    return false;
+  }
+
+  queryOut.modelPath = NormalizePath(modelPath);
+  queryOut.vertexIndex = vertexIndex;
+  return !queryOut.modelPath.empty();
 }
 
 bool TryGetFaceLabelFromEntry(const Handle(TDocStd_Document) & document,
@@ -695,6 +750,57 @@ bool ParseCameraState(const std::string &text, CameraState &stateOut) {
          ParseCameraPoint(screenPoint, stateOut.screenX, stateOut.screenY);
 }
 
+bool ParseMouseReplayQuery(const std::string &queryRaw,
+                           MouseReplayQuery &queryOut) {
+  std::istringstream fields(queryRaw);
+  std::string mousePart;
+  std::string cameraText;
+  if (!(fields >> queryOut.modelPath >> mousePart)) {
+    return false;
+  }
+  std::getline(fields, cameraText);
+  const std::size_t firstNonSpace = cameraText.find_first_not_of(" \t");
+  if (firstNonSpace == std::string::npos || mousePart.rfind("mouse:", 0) != 0) {
+    return false;
+  }
+
+  const std::string coordinates = mousePart.substr(6);
+  const std::size_t comma = coordinates.find(',');
+  if (comma == std::string::npos || coordinates.find(',', comma + 1) !=
+                                         std::string::npos) {
+    return false;
+  }
+
+  auto parseCoordinate = [](std::string_view text, Standard_Integer &valueOut) {
+    if (text.empty()) {
+      return false;
+    }
+    long value = 0;
+    for (const char ch : text) {
+      if (ch < '0' || ch > '9') {
+        return false;
+      }
+      value = value * 10 + static_cast<long>(ch - '0');
+      if (value > std::numeric_limits<Standard_Integer>::max()) {
+        return false;
+      }
+    }
+    valueOut = static_cast<Standard_Integer>(value);
+    return true;
+  };
+
+  if (!parseCoordinate(std::string_view(coordinates).substr(0, comma),
+                       queryOut.mouseX) ||
+      !parseCoordinate(std::string_view(coordinates).substr(comma + 1),
+                       queryOut.mouseY) ||
+      !ParseCameraState(cameraText.substr(firstNonSpace), queryOut.camera)) {
+    return false;
+  }
+
+  queryOut.modelPath = NormalizePath(queryOut.modelPath);
+  return !queryOut.modelPath.empty();
+}
+
 bool FindMouseRayHit(const Handle(V3d_View) & view,
                      const Standard_Integer mouseX,
                      const Standard_Integer mouseY, const TopoDS_Shape &shape,
@@ -742,6 +848,66 @@ bool FindMouseRayHit(const Handle(V3d_View) & view,
     }
   }
   return found;
+}
+
+bool FindVertexByIndex(const TopoDS_Shape &shape,
+                       const Standard_Integer vertexIndex,
+                       TopoDS_Vertex &vertexOut) {
+  if (shape.IsNull() || vertexIndex <= 0) {
+    return false;
+  }
+
+  TopTools_IndexedMapOfShape vertexMap;
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertexMap);
+  if (vertexIndex > vertexMap.Extent()) {
+    return false;
+  }
+
+  vertexOut = TopoDS::Vertex(vertexMap(vertexIndex));
+  return !vertexOut.IsNull();
+}
+
+Standard_Integer FindVertexIndex(const TopoDS_Shape &shape,
+                                 const TopoDS_Vertex &vertex) {
+  if (shape.IsNull() || vertex.IsNull()) {
+    return 0;
+  }
+
+  TopTools_IndexedMapOfShape vertexMap;
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertexMap);
+  Standard_Integer vertexIndex = vertexMap.FindIndex(vertex);
+  if (vertexIndex != 0) {
+    return vertexIndex;
+  }
+
+  for (Standard_Integer i = 1; i <= vertexMap.Extent(); ++i) {
+    if (vertexMap(i).IsSame(vertex)) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+Standard_Integer FindNearestVertexIndex(const TopoDS_Shape &shape,
+                                        const gp_Pnt &point,
+                                        const Standard_Real maxDistance) {
+  if (shape.IsNull()) {
+    return 0;
+  }
+
+  TopTools_IndexedMapOfShape vertexMap;
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertexMap);
+  Standard_Integer nearestIndex = 0;
+  Standard_Real nearestDistance = maxDistance * maxDistance;
+  for (Standard_Integer i = 1; i <= vertexMap.Extent(); ++i) {
+    const gp_Pnt vertexPoint = BRep_Tool::Pnt(TopoDS::Vertex(vertexMap(i)));
+    const Standard_Real distance = vertexPoint.SquareDistance(point);
+    if (distance <= nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = i;
+    }
+  }
+  return nearestIndex;
 }
 
 std::string SerializeCameraState(const Handle(V3d_View) & view) {
@@ -879,6 +1045,7 @@ int main(int argc, char *argv[]) {
   CameraState cameraState;
   bool hasCameraState = false;
   std::string cliForwardQuery;
+  std::string cliModelPath;
   if (argc == 4) {
     if (!ParseCameraState(argv[3], cameraState)) {
       std::cerr << "Error: invalid camera state; expected "
@@ -899,17 +1066,27 @@ int main(int argc, char *argv[]) {
   } else if (argc == 3 && ParseCameraState(argv[2], cameraState)) {
     hasCameraState = true;
   } else if (argc == 2 || argc == 3) {
-    SourceQuery parsedQuery;
-    std::string canonicalSource;
-    std::string parseError;
     const char *queryArgument = argc == 2 ? argv[1] : argv[2];
-    if (ParseForwardQuery(queryArgument, parsedQuery, canonicalSource,
-                          parseError)) {
-      cliForwardQuery = canonicalSource;
-    } else if (argc == 3) {
-      std::cerr << "Error: invalid camera state or forward-navigation query: "
-                << parseError << std::endl;
-      return 1;
+    VertexReplayQuery vertexQuery;
+    MouseReplayQuery mouseQuery;
+    if (ParseMouseReplayQuery(queryArgument, mouseQuery)) {
+      cliForwardQuery = queryArgument;
+      cliModelPath = mouseQuery.modelPath;
+    } else if (ParseVertexReplayQuery(queryArgument, vertexQuery)) {
+      cliForwardQuery = queryArgument;
+      cliModelPath = vertexQuery.modelPath;
+    } else {
+      SourceQuery parsedQuery;
+      std::string canonicalSource;
+      std::string parseError;
+      if (ParseForwardQuery(queryArgument, parsedQuery, canonicalSource,
+                            parseError)) {
+        cliForwardQuery = canonicalSource;
+      } else if (argc == 3) {
+        std::cerr << "Error: invalid camera state or forward-navigation query: "
+                  << parseError << std::endl;
+        return 1;
+      }
     }
   }
 
@@ -928,7 +1105,10 @@ int main(int argc, char *argv[]) {
 
     const bool socketUnavailable =
         (sendErrno == ENOENT || sendErrno == ECONNREFUSED);
-    if (argc >= 3 && socketUnavailable) {
+    if (!cliModelPath.empty() && socketUnavailable) {
+      std::cerr << "Forward navigation socket unavailable; opening viewer for "
+                << cliModelPath << " and applying query locally." << std::endl;
+    } else if (argc >= 3 && socketUnavailable) {
       std::cerr << "Forward navigation socket unavailable; opening viewer for "
                 << argv[1] << " and applying query locally." << std::endl;
     } else {
@@ -939,7 +1119,8 @@ int main(int argc, char *argv[]) {
 #endif
   }
 
-  const std::filesystem::path stepPathInput(argv[1]);
+  const std::filesystem::path stepPathInput(
+      cliModelPath.empty() ? argv[1] : cliModelPath);
   const std::filesystem::path stepPathAbsolute =
       std::filesystem::absolute(stepPathInput).lexically_normal();
   const std::string stepPathForOcct = stepPathAbsolute.string();
@@ -1269,6 +1450,103 @@ int main(int argc, char *argv[]) {
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
                          &lastFbHeight);
 
+  auto getRootShape = [&](TopoDS_Shape &rootShapeOut) {
+    return !shapeTool.IsNull() && shapeTool->GetShape(rootLabel, rootShapeOut) &&
+           !rootShapeOut.IsNull();
+  };
+
+  auto vertexEntry = [&](const Standard_Integer vertexIndex) {
+    TCollection_AsciiString rootEntry;
+    TDF_Tool::Entry(rootLabel, rootEntry);
+    return std::string(rootEntry.ToCString()) + ":v" +
+           std::to_string(vertexIndex);
+  };
+
+  auto printVertexReplay = [&](const TopoDS_Shape &rootShape,
+                               const Standard_Integer vertexIndex,
+                               const gp_Pnt &stabPoint, const bool hasStab,
+                               const bool includeEntry) {
+    TopoDS_Vertex vertex;
+    if (!FindVertexByIndex(rootShape, vertexIndex, vertex)) {
+      return false;
+    }
+
+    const gp_Pnt vertexPoint = BRep_Tool::Pnt(vertex);
+    if (includeEntry) {
+      const std::string modelEntry =
+          std::filesystem::path(stepPathForOcct).filename().string() + ":" +
+          vertexEntry(vertexIndex);
+      std::cout << modelEntry << ' ';
+    }
+    std::cout << "snap:" << vertexPoint.X() << ',' << vertexPoint.Y() << ','
+              << vertexPoint.Z();
+    if (hasStab) {
+      std::cout << " stab:" << std::setprecision(17) << stabPoint.X() << ','
+                << stabPoint.Y() << ',' << stabPoint.Z();
+    }
+    std::cout << std::endl;
+    return true;
+  };
+
+  auto applyVertexReplayQuery = [&](const std::string &rawQueryLine) {
+    VertexReplayQuery query;
+    TopoDS_Shape rootShape;
+    if (!ParseVertexReplayQuery(rawQueryLine, query) ||
+        !getRootShape(rootShape) ||
+        !printVertexReplay(rootShape, query.vertexIndex, gp_Pnt(), false,
+                           false)) {
+      std::cerr << "Vertex replay ignored (query='" << rawQueryLine << "')"
+                << std::endl;
+    }
+  };
+
+  auto applyMouseReplayQuery = [&](const std::string &rawQueryLine) {
+    MouseReplayQuery query;
+    TopoDS_Shape rootShape;
+    if (!ParseMouseReplayQuery(rawQueryLine, query) || !getRootShape(rootShape)) {
+      return false;
+    }
+
+    ApplyCameraState(view, query.camera);
+    context->SetSelectionModeActive(xcafPresentation, 4, Standard_False);
+    context->SetSelectionModeActive(xcafPresentation, 1, Standard_True);
+    context->UpdateCurrentViewer();
+    context->MoveTo(query.mouseX, query.mouseY, view, Standard_True);
+    context->SelectDetected();
+
+    Standard_Integer vertexIndex = 0;
+    for (context->InitSelected(); context->MoreSelected();
+         context->NextSelected()) {
+      Handle(StdSelect_BRepOwner) owner =
+          Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+      if (!owner.IsNull() && owner->Shape().ShapeType() == TopAbs_VERTEX) {
+        vertexIndex = FindVertexIndex(rootShape,
+                                      TopoDS::Vertex(owner->Shape()));
+        if (vertexIndex != 0) {
+          break;
+        }
+      }
+    }
+
+    gp_Pnt stabPoint;
+    if (!FindMouseRayHit(view, query.mouseX, query.mouseY, rootShape,
+                         stabPoint)) {
+      std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
+                << "')" << std::endl;
+      return false;
+    }
+    if (vertexIndex == 0) {
+      vertexIndex = FindNearestVertexIndex(rootShape, stabPoint, 1.0e-6);
+    }
+    if (vertexIndex == 0 ||
+        !printVertexReplay(rootShape, vertexIndex, stabPoint, true, true)) {
+      std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
+                << "')" << std::endl;
+      return false;
+    }
+    return true;
+  };
+
   auto applyForwardNavigationQuery = [&](const std::string &rawQueryLine) {
     SourceQuery query;
     std::string canonicalQuerySource;
@@ -1313,9 +1591,25 @@ int main(int argc, char *argv[]) {
     }
     std::cout << std::endl;
   };
+  auto applyQuery = [&](const std::string &rawQueryLine) {
+    MouseReplayQuery mouseQuery;
+    if (ParseMouseReplayQuery(rawQueryLine, mouseQuery)) {
+      (void)applyMouseReplayQuery(rawQueryLine);
+      return;
+    }
+
+    VertexReplayQuery vertexQuery;
+    if (ParseVertexReplayQuery(rawQueryLine, vertexQuery)) {
+      applyVertexReplayQuery(rawQueryLine);
+      return;
+    }
+
+    applyForwardNavigationQuery(rawQueryLine);
+  };
+
 
   if (!cliForwardQuery.empty()) {
-    applyForwardNavigationQuery(cliForwardQuery);
+    applyQuery(cliForwardQuery);
   }
   if (hasCameraState) {
     ApplyCameraState(view, cameraState);
@@ -1349,7 +1643,7 @@ int main(int argc, char *argv[]) {
     if (forwardNavSocketFd >= 0) {
       std::string receivedLine;
       while (ReadSingleDatagramLine(forwardNavSocketFd, receivedLine)) {
-        applyForwardNavigationQuery(receivedLine);
+        applyQuery(receivedLine);
       }
     }
 #endif
