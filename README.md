@@ -13,30 +13,9 @@ cmake -Bbuild && cmake --build build
 OCCT_XCAF_FacePicker model.step
 ```
 
-Press Space in the viewer to print a camera state in copy/paste form:
-
-```text
-eye_x,eye_y,eye_z:target_x,target_y,target_z:up_x,up_y,up_z
-```
-
-Pass that value as the final argument to restore the camera. The source query
-remains optional:
-
-```bash
-OCCT_XCAF_FacePicker model.step 1.23,34.5,3:0,0,0:0,1,0
-OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
-```
-
-Shift-left-click a vertex to print its STEP entry, the vertex coordinates,
-the camera replay string, and a snap coordinate:
-
-```text
-model.step:0:1:1:1:23 stab:1.23,2.34,5.67 eye:target:up:x,y snap:1.23,2.34,5.67
-```
-
 ## jump back
 
-Currently [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded. If there's interest, we could support other editors like okular does for synctex.
+Currently [nvim-remote.sh](https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00) is hardcoded. If there's interest, I can support other editors like okular does for synctex.
 
 Opencascade headers `/usr/include/opencascade/XCAF*.hxx` are for metadata like comments or tolerances. Only some some of these make it into the step file, so instead I put the map from face `0:1:1:1:1` to file `main.hs:9:13` in the FILE_DESCRIPTION
 
@@ -58,8 +37,35 @@ OCCT_XCAF_FacePicker main.hs:9:13           # no exact match: search leftwards
 OCCT_XCAF_FacePicker main.hs:+9:+13         # no exact match: search rightwards
 OCCT_XCAF_FacePicker model.step main.hs:9:13 # open the viewer if necessary
 OCCT_XCAF_FacePicker model.step:0:1:1:1:v6   # print the vertex snap
-OCCT_XCAF_FacePicker 'model.step mouse:480,116 eye:at:up:screen'
+OCCT_XCAF_FacePicker model.step mouse:480,116 eye:at:up:screen
+```
 
 For the `model.step + query` form, if sending fails with socket-not-available
 errors (`ENOENT` / `ECONNREFUSED`), the app falls back to opening the viewer
 for `model.step` and applying the query locally.
+
+## camera replay
+
+Press Space in the viewer to print a camera state
+
+```text
+eye_x,eye_y,eye_z:target_x,target_y,target_z:up_x,up_y,up_z
+```
+
+Pass that value as the final argument to restore the camera. The source query
+remains optional:
+
+```bash
+OCCT_XCAF_FacePicker model.step 1.23,34.5,3:0,0,0:0,1,0
+OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
+```
+
+## vertex query
+
+Shift-left-click a vertex to print an index to the vertex, the vertex coordinates (snap),
+the mouse coordinate on the model (stab), the mouse coordinate and the camera
+
+```text
+model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy
+```
+
