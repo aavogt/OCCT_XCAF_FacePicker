@@ -62,10 +62,15 @@ OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
 
 ## vertex query
 
-Shift-left-click a vertex to print an index to the vertex, the vertex coordinates (snap),
-the mouse coordinate on the model (stab), the mouse coordinate and the camera
+Shift-left-click a vertex to print an index to the vertex, the vertex coordinates (snap), the mouse coordinate on the model (stab), the mouse coordinate and the camera
 
 ```text
 model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy
+```
+
+Ctrl-left-click a face to print its STEP entry and RGB color to stdout:
+
+```text
+0:1:1:1:1 color:0.8,0.2,0.1
 ```
 

@@ -1020,6 +1020,7 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0]
               << "                 (open <directory-name>*.step)" << std::endl;
     std::cout << "\tLeft click to jump with nvim-remote.sh\n"
+                 "\tAlt-left click to print the selected face color to stdout\n"
                  "\tShift-left click to print the vertex query to stdout\n"
                  "\tMiddle click to "
                  "pan\n\tRight click to rotate\n\tESC to quit."
@@ -1809,6 +1810,25 @@ int main(int argc, char *argv[]) {
         TCollection_AsciiString pickedEntry;
         TDF_Tool::Entry(targetFaceLabel, pickedEntry);
         const std::string pickedEntryStr = pickedEntry.ToCString();
+
+        const bool isAltPressed = glfwGetKey(occtWindow->getGlfwWindow(),
+                                             GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+                                  glfwGetKey(occtWindow->getGlfwWindow(),
+                                             GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
+        if (isAltPressed) {
+          Quantity_Color faceColor;
+          if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
+                                          faceColor) ||
+              XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
+                                          faceColor)) {
+            std::cout << pickedEntryStr << " color:" << std::setprecision(17)
+                      << faceColor.Red() << ',' << faceColor.Green() << ','
+                      << faceColor.Blue() << std::endl;
+          } else {
+            std::cout << pickedEntryStr << " color:unset" << std::endl;
+          }
+          continue;
+        }
 
         std::cout << pickedEntryStr;
         const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
