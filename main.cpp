@@ -318,7 +318,8 @@ bool ParseForwardQuery(std::string queryRaw, SourceQuery &queryOut,
 bool ParseVertexReplayQuery(const std::string &queryRaw,
                             VertexReplayQuery &queryOut) {
   std::string query = queryRaw;
-  while (!query.empty() && std::isspace(static_cast<unsigned char>(query.back()))) {
+  while (!query.empty() &&
+         std::isspace(static_cast<unsigned char>(query.back()))) {
     query.pop_back();
   }
   const std::size_t firstNonSpace = query.find_first_not_of(" \t\n\r");
@@ -347,8 +348,8 @@ bool ParseVertexReplayQuery(const std::string &queryRaw,
   }
 
   const std::string modelPath = query.substr(0, entrySeparator);
-  const std::string entry = query.substr(entrySeparator + 1,
-                                         vertexMarker - entrySeparator - 1);
+  const std::string entry =
+      query.substr(entrySeparator + 1, vertexMarker - entrySeparator - 1);
   if (entry.size() < 2 || entry.compare(0, 2, "0:") != 0) {
     return false;
   }
@@ -766,8 +767,8 @@ bool ParseMouseReplayQuery(const std::string &queryRaw,
 
   const std::string coordinates = mousePart.substr(6);
   const std::size_t comma = coordinates.find(',');
-  if (comma == std::string::npos || coordinates.find(',', comma + 1) !=
-                                         std::string::npos) {
+  if (comma == std::string::npos ||
+      coordinates.find(',', comma + 1) != std::string::npos) {
     return false;
   }
 
@@ -1452,7 +1453,8 @@ int main(int argc, char *argv[]) {
                          &lastFbHeight);
 
   auto getRootShape = [&](TopoDS_Shape &rootShapeOut) {
-    return !shapeTool.IsNull() && shapeTool->GetShape(rootLabel, rootShapeOut) &&
+    return !shapeTool.IsNull() &&
+           shapeTool->GetShape(rootLabel, rootShapeOut) &&
            !rootShapeOut.IsNull();
   };
 
@@ -1504,7 +1506,8 @@ int main(int argc, char *argv[]) {
   auto applyMouseReplayQuery = [&](const std::string &rawQueryLine) {
     MouseReplayQuery query;
     TopoDS_Shape rootShape;
-    if (!ParseMouseReplayQuery(rawQueryLine, query) || !getRootShape(rootShape)) {
+    if (!ParseMouseReplayQuery(rawQueryLine, query) ||
+        !getRootShape(rootShape)) {
       return false;
     }
 
@@ -1521,8 +1524,8 @@ int main(int argc, char *argv[]) {
       Handle(StdSelect_BRepOwner) owner =
           Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
       if (!owner.IsNull() && owner->Shape().ShapeType() == TopAbs_VERTEX) {
-        vertexIndex = FindVertexIndex(rootShape,
-                                      TopoDS::Vertex(owner->Shape()));
+        vertexIndex =
+            FindVertexIndex(rootShape, TopoDS::Vertex(owner->Shape()));
         if (vertexIndex != 0) {
           break;
         }
@@ -1607,7 +1610,6 @@ int main(int argc, char *argv[]) {
 
     applyForwardNavigationQuery(rawQueryLine);
   };
-
 
   if (!cliForwardQuery.empty()) {
     applyQuery(cliForwardQuery);
