@@ -87,6 +87,7 @@
 #include <Quantity_Color.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -1789,13 +1790,51 @@ int main(int argc, char *argv[]) {
           const std::string modelEntry =
               std::filesystem::path(stepPathForOcct).filename().string() + ":" +
               pickedEntryStr;
+          TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+          TopExp::MapShapesAndAncestors(rootShape, TopAbs_VERTEX, TopAbs_FACE,
+                                         vertexFaces);
+
           std::cout << modelEntry << " snap:" << vertexPoint.X() << ','
                     << vertexPoint.Y() << ',' << vertexPoint.Z()
                     << " stab:" << std::setprecision(17) << stabPoint.X() << ','
                     << stabPoint.Y() << ',' << stabPoint.Z()
                     << " mouse:" << mouseX << "," << mouseY << ' '
-                    << SerializeCameraReplay(view, screenX, screenY)
-                    << std::endl;
+                    << SerializeCameraReplay(view, screenX, screenY) << ' ';
+          if (vertexFaces.Contains(pickedVertex)) {
+            const TopTools_ListOfShape &incidentFaces =
+                vertexFaces.FindFromKey(pickedVertex);
+            TopTools_IndexedMapOfShape seenFaces;
+            bool printedFaceColor = false;
+            for (TopTools_ListIteratorOfListOfShape faceIt(incidentFaces);
+                 faceIt.More(); faceIt.Next()) {
+              const TopoDS_Shape &incidentFace = faceIt.Value();
+              if (seenFaces.Contains(incidentFace)) {
+                continue;
+              }
+              seenFaces.Add(incidentFace);
+
+              TDF_Label faceLabel;
+              if (!shapeTool->FindSubShape(rootLabel, incidentFace,
+                                           faceLabel)) {
+                continue;
+              }
+
+              Quantity_Color faceColor;
+              if (XCAFDoc_ColorTool::GetColor(faceLabel, XCAFDoc_ColorSurf,
+                                              faceColor) ||
+                  XCAFDoc_ColorTool::GetColor(faceLabel, XCAFDoc_ColorGen,
+                                              faceColor)) {
+                if (!printedFaceColor) {
+                  std::printf("#");
+                  printedFaceColor = true;
+                }
+                std::printf("%02x%02x%02x", (int)round(255 * faceColor.Red()),
+                            (int)round(255 * faceColor.Green()),
+                            (int)round(255 * faceColor.Blue()));
+              }
+            }
+          }
+          std::cout << std::endl;
           continue;
         }
 

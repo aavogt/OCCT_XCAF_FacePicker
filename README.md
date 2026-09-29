@@ -68,9 +68,11 @@ Shift-left-click a vertex to print an index to the vertex, the vertex coordinate
 model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy
 ```
 
-Ctrl-left-click a face to print its STEP entry and RGB color to stdout:
+Alt-left-click a face to print its RGB color as `#rrggbb`.
+
+Shift-left-click a vertex appends the incident face colors in OCCT topology order as one concatenated string:
 
 ```text
-0:1:1:1:1 color:0.8,0.2,0.1
+... mouse:478,822 eyexyz:targetxyz:upxyz:screenxy #rrggbbrrggbbrrggbb
 ```
 
