@@ -1823,9 +1823,9 @@ int main(int argc, char *argv[]) {
                                           faceColor) ||
               XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
                                           faceColor)) {
-            std::cout << pickedEntryStr << " color:" << std::setprecision(17)
-                      << faceColor.Red() << ',' << faceColor.Green() << ','
-                      << faceColor.Blue() << std::endl;
+            std::printf("#%02x%02x%02x\n", (int)round(255 * faceColor.Red()),
+                        (int)round(255 * faceColor.Green()),
+                        (int)round(255 * faceColor.Blue()));
           } else {
             std::cout << pickedEntryStr << " color:unset" << std::endl;
           }
