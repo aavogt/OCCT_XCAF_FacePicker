@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -1022,8 +1023,8 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0]
               << "                 (open <directory-name>*.step)" << std::endl;
     std::cout << "\tLeft click to jump with nvim-remote.sh\n"
-                 "\tAlt-left click to print the selected face color to stdout\n"
-                 "\tShift-left click to print the vertex query to stdout\n"
+                 "\tAlt- or Shift-left click to query a vertex, falling back "
+                 "to face color\n"
                  "\tMiddle click to "
                  "pan\n\tRight click to rotate\n\tESC to quit."
               << std::endl;
@@ -1440,7 +1441,7 @@ int main(int argc, char *argv[]) {
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
   bool wasMiddlePressed = false;
-  bool wasShiftPressed = false;
+  bool wasSpecialClickModifierPressed = false;
   bool wasSpacePressed = false;
 
   double rotateStartX = 0.0;
@@ -1614,14 +1615,16 @@ int main(int argc, char *argv[]) {
 
   if (!cliForwardQuery.empty()) {
     applyQuery(cliForwardQuery);
+    cliForwardQuery = "";
   }
   if (hasCameraState) {
     ApplyCameraState(view, cameraState);
+    hasCameraState = false;
   }
 
   // 3. Event/render loop
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
-    glfwPollEvents();
+    glfwWaitEvents();
 
     const bool isSpacePressed =
         glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
@@ -1680,9 +1683,16 @@ int main(int argc, char *argv[]) {
                                            GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                                 glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-    if (isShiftPressed != wasShiftPressed) {
-      context->SetSelectionModeActive(xcafPresentation, 4, !isShiftPressed);
-      context->SetSelectionModeActive(xcafPresentation, 1, isShiftPressed);
+    const bool isAltPressed = glfwGetKey(occtWindow->getGlfwWindow(),
+                                         GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+                              glfwGetKey(occtWindow->getGlfwWindow(),
+                                         GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
+    const bool isSpecialClickModifierPressed = isShiftPressed || isAltPressed;
+    if (isSpecialClickModifierPressed != wasSpecialClickModifierPressed) {
+      context->SetSelectionModeActive(xcafPresentation, 4,
+                                      !isSpecialClickModifierPressed);
+      context->SetSelectionModeActive(xcafPresentation, 1,
+                                      isSpecialClickModifierPressed);
       context->UpdateCurrentViewer();
     }
 
@@ -1728,26 +1738,42 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
-    // Left click selects a face; Shift-left-click selects a vertex.
+    // Modifier-left-click prefers a vertex, then falls back to face color.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
         !isMiddlePressed) {
       context->SelectDetected();
 
-      for (context->InitSelected(); context->MoreSelected();
-           context->NextSelected()) {
-        Handle(SelectMgr_EntityOwner) owner = context->SelectedOwner();
-        Handle(StdSelect_BRepOwner) brepOwner =
-            Handle(StdSelect_BRepOwner)::DownCast(owner);
-
-        if (brepOwner.IsNull() || shapeTool.IsNull() || colorTool.IsNull()) {
-          continue;
+      const int selectionPassCount = isSpecialClickModifierPressed ? 2 : 1;
+      bool handledVertex = false;
+      for (int selectionPass = 0; selectionPass < selectionPassCount;
+           ++selectionPass) {
+        const bool vertexPass = isSpecialClickModifierPressed &&
+                                selectionPass == 0;
+        if (selectionPass > 0) {
+          context->SetSelectionModeActive(xcafPresentation, 1, Standard_False);
+          context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
+          context->UpdateCurrentViewer();
+          context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
+                          view, Standard_True);
+          context->SelectDetected();
         }
+        for (context->InitSelected(); context->MoreSelected();
+             context->NextSelected()) {
+          Handle(SelectMgr_EntityOwner) owner = context->SelectedOwner();
+          Handle(StdSelect_BRepOwner) brepOwner =
+              Handle(StdSelect_BRepOwner)::DownCast(owner);
 
-        TopoDS_Shape pickedShape = brepOwner->Shape();
-        if (wasShiftPressed || isShiftPressed) {
-          if (pickedShape.ShapeType() != TopAbs_VERTEX) {
+          if (brepOwner.IsNull() || shapeTool.IsNull() || colorTool.IsNull()) {
             continue;
           }
+
+          TopoDS_Shape pickedShape = brepOwner->Shape();
+          const bool isVertex = pickedShape.ShapeType() == TopAbs_VERTEX;
+          if ((vertexPass && !isVertex) || (!vertexPass && isVertex)) {
+            continue;
+          }
+
+          if (vertexPass) {
 
           const TopoDS_Vertex pickedVertex = TopoDS::Vertex(pickedShape);
           TopoDS_Shape rootShape;
@@ -1792,7 +1818,7 @@ int main(int argc, char *argv[]) {
               pickedEntryStr;
           TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
           TopExp::MapShapesAndAncestors(rootShape, TopAbs_VERTEX, TopAbs_FACE,
-                                         vertexFaces);
+                                        vertexFaces);
 
           std::cout << modelEntry << " snap:" << vertexPoint.X() << ','
                     << vertexPoint.Y() << ',' << vertexPoint.Z()
@@ -1825,7 +1851,7 @@ int main(int argc, char *argv[]) {
                   XCAFDoc_ColorTool::GetColor(faceLabel, XCAFDoc_ColorGen,
                                               faceColor)) {
                 if (!printedFaceColor) {
-                  std::printf("#");
+                  std::printf("[colorQuery|");
                   printedFaceColor = true;
                 }
                 std::printf("%02x%02x%02x", (int)round(255 * faceColor.Red()),
@@ -1833,11 +1859,13 @@ int main(int argc, char *argv[]) {
                             (int)round(255 * faceColor.Blue()));
               }
             }
+            if (printedFaceColor)
+              std::printf("|]");
           }
           std::cout << std::endl;
-          continue;
+          handledVertex = true;
+          break;
         }
-
         if (pickedShape.ShapeType() != TopAbs_FACE) {
           continue;
         }
@@ -1852,11 +1880,7 @@ int main(int argc, char *argv[]) {
         TDF_Tool::Entry(targetFaceLabel, pickedEntry);
         const std::string pickedEntryStr = pickedEntry.ToCString();
 
-        const bool isAltPressed = glfwGetKey(occtWindow->getGlfwWindow(),
-                                             GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
-                                  glfwGetKey(occtWindow->getGlfwWindow(),
-                                             GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
-        if (isAltPressed) {
+        if (isSpecialClickModifierPressed) {
           Quantity_Color faceColor;
           if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
                                           faceColor) ||
@@ -1868,7 +1892,7 @@ int main(int argc, char *argv[]) {
           } else {
             std::cout << pickedEntryStr << " color:unset" << std::endl;
           }
-          continue;
+          break;
         }
 
         std::cout << pickedEntryStr;
@@ -1881,6 +1905,18 @@ int main(int argc, char *argv[]) {
           }
         }
         std::cout << std::endl;
+
+      }
+        if (handledVertex) {
+          break;
+        }
+      }
+      if (isSpecialClickModifierPressed) {
+        context->SetSelectionModeActive(xcafPresentation, 4, Standard_False);
+        context->SetSelectionModeActive(xcafPresentation, 1, Standard_True);
+        context->UpdateCurrentViewer();
+        context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
+                        Standard_True);
       }
       dirty = true;
     }
@@ -1889,7 +1925,7 @@ int main(int argc, char *argv[]) {
     wasRightPressed = isRightPressed;
     wasMiddlePressed = isMiddlePressed;
     wasSpacePressed = isSpacePressed;
-    wasShiftPressed = isShiftPressed;
+    wasSpecialClickModifierPressed = isSpecialClickModifierPressed;
 
     if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();

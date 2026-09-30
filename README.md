@@ -60,19 +60,12 @@ OCCT_XCAF_FacePicker model.step 1.23,34.5,3:0,0,0:0,1,0
 OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
 ```
 
-## vertex query
+## Vertex and face query
 
-Shift-left-click a vertex to print an index to the vertex, the vertex coordinates (snap), the mouse coordinate on the model (stab), the mouse coordinate and the camera
+Alt- or Shift-left-click first queries a picked vertex; if no vertex query is possible, it prints the picked face color as `#rrggbb`.
 
-```text
-model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy
-```
-
-Alt-left-click a face to print its RGB color as `#rrggbb`.
-
-Shift-left-click a vertex appends the incident face colors in OCCT topology order as one concatenated string:
+Vertex query output includes the vertex index, coordinates (`snap`), mouse hit point (`stab`), mouse coordinate, and camera state. Incident face colors are appended when available:
 
 ```text
-... mouse:478,822 eyexyz:targetxyz:upxyz:screenxy #rrggbbrrggbbrrggbb
+model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy [colorQuery|rrggbbrrggbb|]
 ```
-
