@@ -46,7 +46,7 @@ for `model.step` and applying the query locally.
 
 ## camera replay
 
-Press Space in the viewer to print a camera state
+Press Space in the viewer to print a camera state. Press H to cycle the help overlay through key labels only, key labels with descriptions, and `h(elp)`.
 
 ```text
 eye_x,eye_y,eye_z:target_x,target_y,target_z:up_x,up_y,up_z
