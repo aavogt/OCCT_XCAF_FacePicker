@@ -70,6 +70,8 @@
 #include <Graphic3d_TextureEnv.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_TypeOfShadingModel.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
+#include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -1206,6 +1208,22 @@ int main(int argc, char *argv[]) {
     break;
   }
 
+  auto configurePbrMaterial = [](const Handle(Graphic3d_AspectFillArea3d) &aspect) {
+    if (aspect.IsNull()) {
+      return;
+    }
+
+    auto configureMaterial = [](Graphic3d_MaterialAspect &material) {
+      material.SetSpecularColor(
+          Quantity_Color(0.33, 0.33, 0.33, Quantity_TOC_RGB));
+      Graphic3d_PBRMaterial pbrMaterial = material.PBRMaterial();
+      pbrMaterial.SetRoughness(0.2f);
+      material.SetPBRMaterial(pbrMaterial);
+    };
+    configureMaterial(aspect->ChangeFrontMaterial());
+    configureMaterial(aspect->ChangeBackMaterial());
+  };
+
   Handle(Prs3d_Drawer) defaultDrawer = context->DefaultDrawer();
   defaultDrawer->SetFaceBoundaryDraw(Standard_True);
   defaultDrawer->SetFaceBoundaryAspect(
@@ -1217,6 +1235,7 @@ int main(int argc, char *argv[]) {
     defaultShadingAspect->Aspect()->SetShadingModel(
         Graphic3d_TypeOfShadingModel_Pbr);
   }
+  configurePbrMaterial(defaultShadingAspect->Aspect());
 
   const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
   const Standard_Boolean kApplyTintColor = Standard_False;
@@ -1268,6 +1287,7 @@ int main(int argc, char *argv[]) {
 
     presentation->SetAttributes(drawer);
     presentation->SynchronizeAspects();
+    configurePbrMaterial(fillAspect);
   };
 
   auto loadModelFromDisk = [&]() -> bool {
