@@ -62,7 +62,7 @@ OCCT_XCAF_FacePicker model.step main.hs:9:13 1.23,34.5,3:0,0,0:0,1,0
 
 ## Vertex and face query
 
-Alt- or Shift-left-click first queries a picked vertex; if no vertex query is possible, it prints the picked face color as `#rrggbb`.
+Alt- or Shift-left-click first queries a picked vertex; if no vertex query is possible, it prints the picked face color as `#rrggbb face:<index>`. If the face has no color, it prints `<label> face:<index> color:unset`.
 
 Vertex query output includes the vertex index, coordinates (`snap`), mouse hit point (`stab`), mouse coordinate, and camera state. Incident face colors are appended when available:
 

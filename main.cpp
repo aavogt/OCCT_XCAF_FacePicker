@@ -1671,7 +1671,7 @@ int main(int argc, char *argv[]) {
 
   // 3. Event/render loop
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
-    glfwWaitEvents();
+    glfwWaitEventsTimeout(0.1);
 
     const bool isSpacePressed =
         glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
@@ -1962,16 +1962,35 @@ int main(int argc, char *argv[]) {
           const std::string pickedEntryStr = pickedEntry.ToCString();
 
           if (isShiftPressed) {
+            TopoDS_Shape rootShape;
+            Standard_Integer faceIndex = 0;
+            if (shapeTool->GetShape(rootLabel, rootShape) &&
+                !rootShape.IsNull()) {
+              TopTools_IndexedMapOfShape faceMap;
+              TopExp::MapShapes(rootShape, TopAbs_FACE, faceMap);
+              faceIndex = faceMap.FindIndex(pickedFace);
+              if (faceIndex == 0) {
+                for (Standard_Integer i = 1; i <= faceMap.Extent(); ++i) {
+                  if (faceMap(i).IsSame(pickedFace)) {
+                    faceIndex = i;
+                    break;
+                  }
+                }
+              }
+            }
+
             Quantity_Color faceColor;
             if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
                                             faceColor) ||
                 XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
                                             faceColor)) {
-              std::printf("#%02x%02x%02x\n", (int)round(255 * faceColor.Red()),
+              std::printf("#%02x%02x%02x face:%d\n",
+                          (int)round(255 * faceColor.Red()),
                           (int)round(255 * faceColor.Green()),
-                          (int)round(255 * faceColor.Blue()));
+                          (int)round(255 * faceColor.Blue()), faceIndex);
             } else {
-              std::cout << pickedEntryStr << " color:unset" << std::endl;
+              std::cout << pickedEntryStr << " face:" << faceIndex
+                        << " color:unset" << std::endl;
             }
             break;
           }
