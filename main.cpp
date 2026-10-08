@@ -1026,15 +1026,31 @@ bool LaunchMatchingStepViewers(const char *programName) {
 #endif
 }
 
+// After the prefix, a root pair uses: <expression>_<expression>.
+// An expression is RRGGBB or a parenthesized <expression>_<expression>.
 constexpr char kCheckerboardLayerPrefix[] = "CHECKERBOARD_";
 
-struct CheckerboardColors {
-  std::vector<Quantity_Color> values;
+struct CheckerboardNode {
+  std::array<Standard_Byte, 3> color{};
+  Standard_Integer left = -1;
+  Standard_Integer right = -1;
+  Standard_Integer depth = 0;
+
+  bool IsLeaf() const { return left < 0; }
+};
+
+struct CheckerboardTree {
+  std::vector<CheckerboardNode> nodes;
+  Standard_Integer root = -1;
+  Standard_Integer maxNestedDepth = 0;
 };
 
 bool ParseCheckerboardColor(const TCollection_ExtendedString &layerName,
                             Standard_Integer firstPosition,
-                            Quantity_Color &colorOut) {
+                            std::array<Standard_Byte, 3> &colorOut) {
+  if (firstPosition < 1 || firstPosition + 5 > layerName.Length()) {
+    return false;
+  }
   Standard_Integer rgb = 0;
   for (Standard_Integer i = 0; i < 6; ++i) {
     const Standard_ExtCharacter character = layerName.Value(firstPosition + i);
@@ -1051,20 +1067,56 @@ bool ParseCheckerboardColor(const TCollection_ExtendedString &layerName,
     }
     rgb = (rgb << 4) | digit;
   }
+  colorOut = {static_cast<Standard_Byte>((rgb >> 16) & 0xff),
+              static_cast<Standard_Byte>((rgb >> 8) & 0xff),
+              static_cast<Standard_Byte>(rgb & 0xff)};
+  return true;
+}
 
-  colorOut = Quantity_Color(((rgb >> 16) & 0xff) / 255.0,
-                            ((rgb >> 8) & 0xff) / 255.0,
-                            (rgb & 0xff) / 255.0, Quantity_TOC_RGB);
+bool ParseCheckerboardExpression(const TCollection_ExtendedString &layerName,
+                                 Standard_Integer &position,
+                                 std::vector<CheckerboardNode> &nodes,
+                                 Standard_Integer &nodeIndex) {
+  if (position > layerName.Length()) {
+    return false;
+  }
+
+  CheckerboardNode node;
+  if (layerName.Value(position) == '(') {
+    ++position;
+    Standard_Integer left = -1;
+    Standard_Integer right = -1;
+    if (!ParseCheckerboardExpression(layerName, position, nodes, left) ||
+        position > layerName.Length() || layerName.Value(position) != '_') {
+      return false;
+    }
+    ++position;
+    if (!ParseCheckerboardExpression(layerName, position, nodes, right) ||
+        position > layerName.Length() || layerName.Value(position) != ')') {
+      return false;
+    }
+    ++position;
+    node.left = left;
+    node.right = right;
+    node.depth = 1 + std::max(nodes[left].depth, nodes[right].depth);
+  } else {
+    if (!ParseCheckerboardColor(layerName, position, node.color)) {
+      return false;
+    }
+    position += 6;
+  }
+
+  nodeIndex = static_cast<Standard_Integer>(nodes.size());
+  nodes.push_back(node);
   return true;
 }
 
 bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
-                            CheckerboardColors &colorsOut) {
+                            CheckerboardTree &treeOut) {
   constexpr Standard_Integer kPrefixLength =
       sizeof(kCheckerboardLayerPrefix) - 1;
   const Standard_Integer nameLength = layerName.Length();
-  if (nameLength < kPrefixLength + 13 ||
-      (nameLength - kPrefixLength + 1) % 7 != 0) {
+  if (nameLength < kPrefixLength + 13) {
     return false;
   }
   for (Standard_Integer i = 0; i < kPrefixLength; ++i) {
@@ -1077,32 +1129,34 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
     }
   }
 
-  std::vector<Quantity_Color> parsedColors;
-  for (Standard_Integer position = kPrefixLength + 1;
-       position <= nameLength;) {
-    Quantity_Color color;
-    if (!ParseCheckerboardColor(layerName, position, color)) {
-      return false;
-    }
-    parsedColors.push_back(color);
-    position += 6;
-    if (position <= nameLength) {
-      if (layerName.Value(position) != '_') {
-        return false;
-      }
-      ++position;
-    }
-  }
-  if (parsedColors.size() < 2) {
+  std::vector<CheckerboardNode> parsedNodes;
+  Standard_Integer position = kPrefixLength + 1;
+  Standard_Integer left = -1;
+  Standard_Integer right = -1;
+  if (!ParseCheckerboardExpression(layerName, position, parsedNodes, left) ||
+      position > nameLength || layerName.Value(position) != '_') {
     return false;
   }
-  colorsOut.values.swap(parsedColors);
+  ++position;
+  if (!ParseCheckerboardExpression(layerName, position, parsedNodes, right) ||
+      position != nameLength + 1) {
+    return false;
+  }
+
+  CheckerboardNode root;
+  root.left = left;
+  root.right = right;
+  root.depth = 1 + std::max(parsedNodes[left].depth, parsedNodes[right].depth);
+  treeOut.root = static_cast<Standard_Integer>(parsedNodes.size());
+  treeOut.maxNestedDepth = root.depth - 1;
+  parsedNodes.push_back(root);
+  treeOut.nodes.swap(parsedNodes);
   return true;
 }
 
 Handle(AIS_TexturedShape)
 MakeCheckerboardPresentation(const TopoDS_Face &face,
-                             const CheckerboardColors &colors) {
+                             const CheckerboardTree &tree) {
   const Handle(Geom_Plane) plane =
       Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(face));
   if (plane.IsNull()) {
@@ -1136,15 +1190,6 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   };
   const Standard_Integer cellsU = cellCount(uWidth);
   const Standard_Integer cellsV = cellCount(vWidth);
-  std::vector<std::array<Standard_Byte, 3>> colorBytes;
-  colorBytes.reserve(colors.values.size());
-  for (const Quantity_Color &color : colors.values) {
-    colorBytes.push_back({
-        static_cast<Standard_Byte>(std::lround(255.0 * color.Red())),
-        static_cast<Standard_Byte>(std::lround(255.0 * color.Green())),
-        static_cast<Standard_Byte>(std::lround(255.0 * color.Blue()))});
-  }
-
   constexpr Standard_Integer kMaxTextureDimension = 1024;
   constexpr Standard_Integer kMinPixelsPerCell = 4;
   constexpr Standard_Integer kMaxPixelsPerCell = 64;
@@ -1152,7 +1197,8 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   const Standard_Integer maxNestedScale =
       kMaxTextureDimension / (maxBaseCells * kMinPixelsPerCell);
   Standard_Integer nestedScale = 1;
-  for (std::size_t level = 0; level + 2 < colors.values.size(); ++level) {
+  for (Standard_Integer nestedDepth = 0;
+       nestedDepth < tree.maxNestedDepth; ++nestedDepth) {
     if (nestedScale > maxNestedScale / 4) {
       break;
     }
@@ -1170,37 +1216,34 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
                                 textureHeight)) {
     return {};
   }
+  // Raster dimensions cap detail; each texel still walks the tree to a leaf.
+  const CheckerboardNode &root = tree.nodes[tree.root];
   for (Standard_Integer y = 0; y < textureHeight; ++y) {
     Standard_Byte *row = checkerTexture->ChangeRow(y);
     for (Standard_Integer x = 0; x < textureWidth; ++x) {
       const Standard_Integer rootU = x / rootCellPixels;
       const Standard_Integer rootV = y / rootCellPixels;
-      std::size_t colorIndex = (rootU + rootV) % 2 == 0 ? 0 : 1;
-      if (colorIndex != 0) {
-        Standard_Integer regionPixels = rootCellPixels;
-        Standard_Integer localU = x % regionPixels;
-        Standard_Integer localV = y % regionPixels;
-        for (; colorIndex + 1 < colors.values.size(); ++colorIndex) {
-          regionPixels /= 4;
-          if (regionPixels == 0) {
-            colorIndex = colors.values.size() - 1;
-            break;
-          }
-          const Standard_Integer cellU = localU / regionPixels;
-          const Standard_Integer cellV = localV / regionPixels;
-          if ((cellU + cellV) % 2 == 0) {
-            break;
-          }
-          if (colorIndex + 2 == colors.values.size()) {
-            ++colorIndex;
-            break;
-          }
-          localU %= regionPixels;
-          localV %= regionPixels;
-        }
+      Standard_Integer selectedIndex =
+          (rootU + rootV) % 2 == 0 ? root.left : root.right;
+      Standard_Integer localX = x % rootCellPixels;
+      Standard_Integer localY = y % rootCellPixels;
+      Standard_Real u =
+          (static_cast<Standard_Real>(localX) + 0.5) / rootCellPixels;
+      Standard_Real v =
+          (static_cast<Standard_Real>(localY) + 0.5) / rootCellPixels;
+      while (!tree.nodes[selectedIndex].IsLeaf()) {
+        const Standard_Integer cellU =
+            std::min(3, static_cast<Standard_Integer>(u * 4.0));
+        const Standard_Integer cellV =
+            std::min(3, static_cast<Standard_Integer>(v * 4.0));
+        const CheckerboardNode &node = tree.nodes[selectedIndex];
+        selectedIndex = (cellU + cellV) % 2 == 0 ? node.left : node.right;
+        u = u * 4.0 - cellU;
+        v = v * 4.0 - cellV;
       }
 
-      const std::array<Standard_Byte, 3> &color = colorBytes[colorIndex];
+      const std::array<Standard_Byte, 3> &color =
+          tree.nodes[selectedIndex].color;
       Standard_Byte *pixel = row + 4 * x;
       pixel[0] = color[0];
       pixel[1] = color[1];
@@ -1595,12 +1638,12 @@ int main(int argc, char *argv[]) {
         }
         Handle(TColStd_HSequenceOfExtendedString) faceLayers =
             newLayerTool->GetLayers(faceLabel);
-        CheckerboardColors colors;
+        CheckerboardTree tree;
         bool hasCheckerboardColors = false;
         if (!faceLayers.IsNull()) {
           for (Standard_Integer i = faceLayers->Lower();
                i <= faceLayers->Upper(); ++i) {
-            if (ParseCheckerboardLayer(faceLayers->Value(i), colors)) {
+            if (ParseCheckerboardLayer(faceLayers->Value(i), tree)) {
               hasCheckerboardColors = true;
               break;
             }
@@ -1611,7 +1654,7 @@ int main(int argc, char *argv[]) {
         }
 
         Handle(AIS_TexturedShape) checkerboard =
-            MakeCheckerboardPresentation(face, colors);
+            MakeCheckerboardPresentation(face, tree);
         if (checkerboard.IsNull()) {
           std::cerr << "Warning: could not render marked checkerboard face."
                     << std::endl;
