@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -44,6 +45,8 @@
 // OCCT Core / Framework Data
 #include <BinXCAFDrivers.hxx>
 #include <TCollection_AsciiString.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TColStd_HSequenceOfExtendedString.hxx>
 #include <TDF_Label.hxx>
 #include <TDF_Tool.hxx>
 #include <TDocStd_Application.hxx>
@@ -52,6 +55,7 @@
 // XCAF Data Tools
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
 // STEP Reader Engine
@@ -63,6 +67,7 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_LightSource.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_TexturedShape.hxx>
 #include <AIS_TextLabel.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfLine.hxx>
@@ -73,6 +78,8 @@
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ZLayerId.hxx>
+#include <Image_Format.hxx>
+#include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -86,9 +93,15 @@
 
 // Modeling & Structural Helpers
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepGProp.hxx>
+#include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
 #include <Quantity_Color.hxx>
+#include <Geom_Plane.hxx>
+#include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -101,6 +114,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Trsf.hxx>
 
 namespace {
 std::string NormalizePath(std::string path) {
@@ -1012,6 +1026,148 @@ bool LaunchMatchingStepViewers(const char *programName) {
 #endif
 }
 
+constexpr char kCheckerboardLayerPrefix[] = "CHECKERBOARD_";
+
+struct CheckerboardColors {
+  Quantity_Color first;
+  Quantity_Color second;
+};
+
+bool ParseCheckerboardColor(const TCollection_ExtendedString &layerName,
+                            Standard_Integer firstPosition,
+                            Quantity_Color &colorOut) {
+  Standard_Integer rgb = 0;
+  for (Standard_Integer i = 0; i < 6; ++i) {
+    const Standard_ExtCharacter character = layerName.Value(firstPosition + i);
+    Standard_Integer digit = -1;
+    if (character >= '0' && character <= '9') {
+      digit = character - '0';
+    } else if (character >= 'A' && character <= 'F') {
+      digit = character - 'A' + 10;
+    } else if (character >= 'a' && character <= 'f') {
+      digit = character - 'a' + 10;
+    }
+    if (digit < 0) {
+      return false;
+    }
+    rgb = (rgb << 4) | digit;
+  }
+
+  colorOut = Quantity_Color(((rgb >> 16) & 0xff) / 255.0,
+                            ((rgb >> 8) & 0xff) / 255.0,
+                            (rgb & 0xff) / 255.0, Quantity_TOC_RGB);
+  return true;
+}
+
+bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
+                            CheckerboardColors &colorsOut) {
+  constexpr Standard_Integer kPrefixLength =
+      sizeof(kCheckerboardLayerPrefix) - 1;
+  if (layerName.Length() != kPrefixLength + 13 ||
+      layerName.Value(kPrefixLength + 7) != '_') {
+    return false;
+  }
+  for (Standard_Integer i = 0; i < kPrefixLength; ++i) {
+    Standard_ExtCharacter character = layerName.Value(i + 1);
+    if (character >= 'a' && character <= 'z') {
+      character = character - 'a' + 'A';
+    }
+    if (character != kCheckerboardLayerPrefix[i]) {
+      return false;
+    }
+  }
+  return ParseCheckerboardColor(layerName, kPrefixLength + 1,
+                                colorsOut.first) &&
+         ParseCheckerboardColor(layerName, kPrefixLength + 8,
+                                colorsOut.second);
+}
+
+Handle(AIS_TexturedShape)
+MakeCheckerboardPresentation(const TopoDS_Face &face,
+                             const CheckerboardColors &colors) {
+  const Handle(Geom_Plane) plane =
+      Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(face));
+  if (plane.IsNull()) {
+    return {};
+  }
+
+  Standard_Real uMin = 0.0;
+  Standard_Real uMax = 0.0;
+  Standard_Real vMin = 0.0;
+  Standard_Real vMax = 0.0;
+  BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+  const Standard_Real uWidth = std::abs(uMax - uMin);
+  const Standard_Real vWidth = std::abs(vMax - vMin);
+
+  GProp_GProps surfaceProperties;
+  BRepGProp::SurfaceProperties(face, surfaceProperties);
+  const Standard_Real area = surfaceProperties.Mass();
+  if (uWidth <= Precision::Confusion() || vWidth <= Precision::Confusion() ||
+      area <= Precision::SquareConfusion()) {
+    return {};
+  }
+
+  // Use the actual planar area and UV extents to keep texture cells square.
+  // The plane's U/V axes rotate the pattern with the face instead of world XYZ.
+  const Standard_Real targetCellWidth = std::sqrt(area) / 4.0;
+  constexpr Standard_Integer kMaxCellsPerSide = 64;
+  const auto cellCount = [targetCellWidth, kMaxCellsPerSide](Standard_Real extent) {
+    return static_cast<Standard_Integer>(std::clamp(
+        std::lround(extent / targetCellWidth), 1L,
+        static_cast<long>(kMaxCellsPerSide)));
+  };
+  const Standard_Integer cellsU = cellCount(uWidth);
+  const Standard_Integer cellsV = cellCount(vWidth);
+  const std::array<Standard_Byte, 3> firstColor = {
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Red())),
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Green())),
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Blue()))};
+  const std::array<Standard_Byte, 3> secondColor = {
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Red())),
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Green())),
+      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Blue()))};
+
+  const Standard_Integer kPixelsPerCell =
+      std::max(16, 256 / std::max(cellsU, cellsV));
+  Handle(Image_PixMap) checkerTexture = new Image_PixMap();
+  if (!checkerTexture->InitZero(Image_Format_RGBA,
+                                cellsU * kPixelsPerCell,
+                                cellsV * kPixelsPerCell)) {
+    return {};
+  }
+  for (Standard_Integer y = 0; y < cellsV * kPixelsPerCell; ++y) {
+    Standard_Byte *row = checkerTexture->ChangeRow(y);
+    for (Standard_Integer x = 0; x < cellsU * kPixelsPerCell; ++x) {
+      const std::array<Standard_Byte, 3> &color =
+          ((x / kPixelsPerCell) + (y / kPixelsPerCell)) % 2 == 0
+              ? firstColor
+              : secondColor;
+      Standard_Byte *pixel = row + 4 * x;
+      pixel[0] = color[0];
+      pixel[1] = color[1];
+      pixel[2] = color[2];
+      pixel[3] = 255;
+    }
+  }
+
+  gp_Dir normal = plane->Pln().Axis().Direction();
+  if (face.Orientation() == TopAbs_REVERSED) {
+    normal.Reverse();
+  }
+  gp_Vec separation(normal);
+  separation *= std::max(uWidth, vWidth) * 1.0e-5;
+  gp_Trsf lift;
+  lift.SetTranslation(separation);
+  BRepBuilderAPI_Transform liftedFace(face, lift, Standard_True);
+
+  Handle(AIS_TexturedShape) presentation =
+      new AIS_TexturedShape(liftedFace.Shape());
+  presentation->SetTexturePixMap(checkerTexture);
+  presentation->SetTextureRepeat(Standard_False);
+  presentation->SetTextureMapOn();
+  presentation->DisableTextureModulate();
+  return presentation;
+}
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -1249,6 +1405,7 @@ int main(int argc, char *argv[]) {
   std::unordered_map<std::string, std::string> labelSourceByEntry;
   ForwardNavigationData forwardNavigationData;
   Handle(AIS_Shape) forwardNavHighlight;
+  std::vector<Handle(AIS_TexturedShape)> checkerboardPresentations;
 
 #ifndef _WIN32
   int forwardNavSocketFd = -1;
@@ -1353,6 +1510,8 @@ int main(int argc, char *argv[]) {
         XCAFDoc_DocumentTool::ShapeTool(newDoc->Main());
     Handle(XCAFDoc_ColorTool) newColorTool =
         XCAFDoc_DocumentTool::ColorTool(newDoc->Main());
+    Handle(XCAFDoc_LayerTool) newLayerTool =
+        XCAFDoc_DocumentTool::LayerTool(newDoc->Main());
 
     TDF_LabelSequence freeShapes;
     newShapeTool->GetFreeShapes(freeShapes);
@@ -1365,12 +1524,53 @@ int main(int argc, char *argv[]) {
     }
 
     const TDF_Label newRootLabel = freeShapes.First();
+    std::vector<Handle(AIS_TexturedShape)> newCheckerboardPresentations;
+    TopoDS_Shape newRootShape;
+    if (newShapeTool->GetShape(newRootLabel, newRootShape)) {
+      for (TopExp_Explorer faceIt(newRootShape, TopAbs_FACE); faceIt.More();
+           faceIt.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faceIt.Current());
+        TDF_Label faceLabel;
+        if (!newShapeTool->FindSubShape(newRootLabel, face, faceLabel)) {
+          continue;
+        }
+        Handle(TColStd_HSequenceOfExtendedString) faceLayers =
+            newLayerTool->GetLayers(faceLabel);
+        CheckerboardColors colors;
+        bool hasCheckerboardColors = false;
+        if (!faceLayers.IsNull()) {
+          for (Standard_Integer i = faceLayers->Lower();
+               i <= faceLayers->Upper(); ++i) {
+            if (ParseCheckerboardLayer(faceLayers->Value(i), colors)) {
+              hasCheckerboardColors = true;
+              break;
+            }
+          }
+        }
+        if (!hasCheckerboardColors) {
+          continue;
+        }
+
+        Handle(AIS_TexturedShape) checkerboard =
+            MakeCheckerboardPresentation(face, colors);
+        if (checkerboard.IsNull()) {
+          std::cerr << "Warning: could not render marked checkerboard face."
+                    << std::endl;
+          continue;
+        }
+        newCheckerboardPresentations.push_back(checkerboard);
+      }
+    }
+
     Handle(XCAFPrs_AISObject) newPresentation =
         new XCAFPrs_AISObject(newRootLabel);
     applyPresentationStyling(newPresentation);
 
     Handle(TDocStd_Document) oldDoc = doc;
     Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
+    std::vector<Handle(AIS_TexturedShape)> oldCheckerboards;
+    oldCheckerboards.swap(checkerboardPresentations);
+    checkerboardPresentations.swap(newCheckerboardPresentations);
 
     doc = newDoc;
     shapeTool = newShapeTool;
@@ -1381,6 +1581,9 @@ int main(int argc, char *argv[]) {
     if (!oldPresentation.IsNull()) {
       context->Remove(oldPresentation, Standard_False);
     }
+    for (const Handle(AIS_TexturedShape) &oldCheckerboard : oldCheckerboards) {
+      context->Remove(oldCheckerboard, Standard_False);
+    }
 
     context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
     context->SetSelectionModeActive(xcafPresentation, 0, Standard_False);
@@ -1389,6 +1592,11 @@ int main(int argc, char *argv[]) {
                              Standard_False);
     if (kApplyTintColor) {
       context->SetColor(xcafPresentation, kTintColor, Standard_False);
+    }
+    for (const Handle(AIS_TexturedShape) &checkerboard :
+         checkerboardPresentations) {
+      context->Display(checkerboard, 3, 0, Standard_False);
+      context->Deactivate(checkerboard);
     }
 
     view->FitAll();
@@ -2071,3 +2279,4 @@ int main(int argc, char *argv[]) {
   }
   return 0;
 }
+
