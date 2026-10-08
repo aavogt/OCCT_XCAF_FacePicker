@@ -1029,8 +1029,7 @@ bool LaunchMatchingStepViewers(const char *programName) {
 constexpr char kCheckerboardLayerPrefix[] = "CHECKERBOARD_";
 
 struct CheckerboardColors {
-  Quantity_Color first;
-  Quantity_Color second;
+  std::vector<Quantity_Color> values;
 };
 
 bool ParseCheckerboardColor(const TCollection_ExtendedString &layerName,
@@ -1063,8 +1062,9 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
                             CheckerboardColors &colorsOut) {
   constexpr Standard_Integer kPrefixLength =
       sizeof(kCheckerboardLayerPrefix) - 1;
-  if (layerName.Length() != kPrefixLength + 13 ||
-      layerName.Value(kPrefixLength + 7) != '_') {
+  const Standard_Integer nameLength = layerName.Length();
+  if (nameLength < kPrefixLength + 13 ||
+      (nameLength - kPrefixLength + 1) % 7 != 0) {
     return false;
   }
   for (Standard_Integer i = 0; i < kPrefixLength; ++i) {
@@ -1076,10 +1076,28 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
       return false;
     }
   }
-  return ParseCheckerboardColor(layerName, kPrefixLength + 1,
-                                colorsOut.first) &&
-         ParseCheckerboardColor(layerName, kPrefixLength + 8,
-                                colorsOut.second);
+
+  std::vector<Quantity_Color> parsedColors;
+  for (Standard_Integer position = kPrefixLength + 1;
+       position <= nameLength;) {
+    Quantity_Color color;
+    if (!ParseCheckerboardColor(layerName, position, color)) {
+      return false;
+    }
+    parsedColors.push_back(color);
+    position += 6;
+    if (position <= nameLength) {
+      if (layerName.Value(position) != '_') {
+        return false;
+      }
+      ++position;
+    }
+  }
+  if (parsedColors.size() < 2) {
+    return false;
+  }
+  colorsOut.values.swap(parsedColors);
+  return true;
 }
 
 Handle(AIS_TexturedShape)
@@ -1118,30 +1136,71 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   };
   const Standard_Integer cellsU = cellCount(uWidth);
   const Standard_Integer cellsV = cellCount(vWidth);
-  const std::array<Standard_Byte, 3> firstColor = {
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Red())),
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Green())),
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.first.Blue()))};
-  const std::array<Standard_Byte, 3> secondColor = {
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Red())),
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Green())),
-      static_cast<Standard_Byte>(std::lround(255.0 * colors.second.Blue()))};
+  std::vector<std::array<Standard_Byte, 3>> colorBytes;
+  colorBytes.reserve(colors.values.size());
+  for (const Quantity_Color &color : colors.values) {
+    colorBytes.push_back({
+        static_cast<Standard_Byte>(std::lround(255.0 * color.Red())),
+        static_cast<Standard_Byte>(std::lround(255.0 * color.Green())),
+        static_cast<Standard_Byte>(std::lround(255.0 * color.Blue()))});
+  }
 
-  const Standard_Integer kPixelsPerCell =
-      std::max(16, 256 / std::max(cellsU, cellsV));
+  constexpr Standard_Integer kMaxTextureDimension = 1024;
+  constexpr Standard_Integer kMinPixelsPerCell = 4;
+  constexpr Standard_Integer kMaxPixelsPerCell = 64;
+  const Standard_Integer maxBaseCells = std::max(cellsU, cellsV);
+  const Standard_Integer maxNestedScale =
+      kMaxTextureDimension / (maxBaseCells * kMinPixelsPerCell);
+  Standard_Integer nestedScale = 1;
+  for (std::size_t level = 0; level + 2 < colors.values.size(); ++level) {
+    if (nestedScale > maxNestedScale / 4) {
+      break;
+    }
+    nestedScale *= 4;
+  }
+  const Standard_Integer pixelsPerCell = std::min(
+      kMaxPixelsPerCell,
+      kMaxTextureDimension / (maxBaseCells * nestedScale));
+  const Standard_Integer rootCellPixels = nestedScale * pixelsPerCell;
+  const Standard_Integer textureWidth = cellsU * rootCellPixels;
+  const Standard_Integer textureHeight = cellsV * rootCellPixels;
+
   Handle(Image_PixMap) checkerTexture = new Image_PixMap();
-  if (!checkerTexture->InitZero(Image_Format_RGBA,
-                                cellsU * kPixelsPerCell,
-                                cellsV * kPixelsPerCell)) {
+  if (!checkerTexture->InitZero(Image_Format_RGBA, textureWidth,
+                                textureHeight)) {
     return {};
   }
-  for (Standard_Integer y = 0; y < cellsV * kPixelsPerCell; ++y) {
+  for (Standard_Integer y = 0; y < textureHeight; ++y) {
     Standard_Byte *row = checkerTexture->ChangeRow(y);
-    for (Standard_Integer x = 0; x < cellsU * kPixelsPerCell; ++x) {
-      const std::array<Standard_Byte, 3> &color =
-          ((x / kPixelsPerCell) + (y / kPixelsPerCell)) % 2 == 0
-              ? firstColor
-              : secondColor;
+    for (Standard_Integer x = 0; x < textureWidth; ++x) {
+      const Standard_Integer rootU = x / rootCellPixels;
+      const Standard_Integer rootV = y / rootCellPixels;
+      std::size_t colorIndex = (rootU + rootV) % 2 == 0 ? 0 : 1;
+      if (colorIndex != 0) {
+        Standard_Integer regionPixels = rootCellPixels;
+        Standard_Integer localU = x % regionPixels;
+        Standard_Integer localV = y % regionPixels;
+        for (; colorIndex + 1 < colors.values.size(); ++colorIndex) {
+          regionPixels /= 4;
+          if (regionPixels == 0) {
+            colorIndex = colors.values.size() - 1;
+            break;
+          }
+          const Standard_Integer cellU = localU / regionPixels;
+          const Standard_Integer cellV = localV / regionPixels;
+          if ((cellU + cellV) % 2 == 0) {
+            break;
+          }
+          if (colorIndex + 2 == colors.values.size()) {
+            ++colorIndex;
+            break;
+          }
+          localU %= regionPixels;
+          localV %= regionPixels;
+        }
+      }
+
+      const std::array<Standard_Byte, 3> &color = colorBytes[colorIndex];
       Standard_Byte *pixel = row + 4 * x;
       pixel[0] = color[0];
       pixel[1] = color[1];
