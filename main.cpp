@@ -71,6 +71,7 @@
 #include <AIS_TextLabel.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfLine.hxx>
+#include <Aspect_PolygonOffsetMode.hxx>
 #include <Graphic3d_NameOfTextureEnv.hxx>
 #include <Graphic3d_TextureEnv.hxx>
 #include <Graphic3d_TransformPers.hxx>
@@ -93,14 +94,13 @@
 
 // Modeling & Structural Helpers
 #include <BRepIntCurveSurface_Inter.hxx>
-#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Quantity_Color.hxx>
-#include <Geom_Plane.hxx>
+#include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -114,7 +114,6 @@
 #include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
-#include <gp_Trsf.hxx>
 
 namespace {
 std::string NormalizePath(std::string path) {
@@ -136,7 +135,7 @@ std::string NormalizePath(std::string path) {
 
 struct ModelWatchContext {
   std::atomic_bool *reloadRequested;
-  std::string watchedFileAbsolutePath;
+  std::vector<std::string> watchedFileAbsolutePaths;
 };
 
 struct MouseScrollContext {
@@ -194,6 +193,19 @@ struct SourcePositionLess {
 
 struct ForwardNavigationData {
   std::multimap<SourcePosition, std::string, SourcePositionLess> entryBySource;
+};
+
+struct LoadedStepModel {
+  std::filesystem::path path;
+  Handle(TDocStd_Document) document;
+  Handle(XCAFDoc_ShapeTool) shapeTool;
+  Handle(XCAFDoc_ColorTool) colorTool;
+  TDF_Label rootLabel;
+  Handle(XCAFPrs_AISObject) presentation;
+  std::unordered_map<std::string, std::string> labelSourceByEntry;
+  ForwardNavigationData forwardNavigationData;
+  Handle(AIS_Shape) forwardNavHighlight;
+  std::vector<Handle(AIS_TexturedShape)> checkerboardPresentations;
 };
 
 #ifndef _WIN32
@@ -681,7 +693,11 @@ void OnModelFileChanged(dmon_watch_id, dmon_action, const char *rootdir,
     }
     fullPath += relativePath;
 
-    return NormalizePath(fullPath) == watchContext->watchedFileAbsolutePath;
+    const std::string normalizedPath = NormalizePath(fullPath);
+    return std::find(watchContext->watchedFileAbsolutePaths.begin(),
+                     watchContext->watchedFileAbsolutePaths.end(),
+                     normalizedPath) !=
+           watchContext->watchedFileAbsolutePaths.end();
   };
 
   if (matchesWatchedFile(filepath) || matchesWatchedFile(oldfilepath)) {
@@ -959,11 +975,9 @@ void ApplyCameraState(const Handle(V3d_View) & view, const CameraState &state) {
   view->SetUp(state.upX, state.upY, state.upZ);
   view->Redraw();
 }
-bool LaunchMatchingStepViewers(const char *programName) {
+bool CollectMatchingStepFiles(std::vector<std::filesystem::path> &stepFiles) {
   const std::filesystem::path workingDirectory =
       std::filesystem::current_path();
-  const std::string prefix = workingDirectory.filename().string();
-  std::vector<std::filesystem::path> stepFiles;
   std::error_code directoryError;
   for (const std::filesystem::directory_entry &entry :
        std::filesystem::directory_iterator(workingDirectory, directoryError)) {
@@ -975,9 +989,7 @@ bool LaunchMatchingStepViewers(const char *programName) {
       continue;
     }
 
-    const std::string filename = entry.path().filename().string();
-    if (filename.compare(0, prefix.size(), prefix) == 0 &&
-        entry.path().extension() == ".step") {
+    if (entry.path().extension() == ".step") {
       stepFiles.push_back(entry.path().lexically_normal());
     }
   }
@@ -990,40 +1002,11 @@ bool LaunchMatchingStepViewers(const char *programName) {
 
   std::sort(stepFiles.begin(), stepFiles.end());
   if (stepFiles.empty()) {
-    std::cerr << "Error: no STEP files matching " << prefix << "*.step in "
+    std::cerr << "Error: no STEP files matching *.step in "
               << workingDirectory << std::endl;
     return false;
   }
-
-#ifdef _WIN32
-  std::cerr << "Error: opening multiple STEP viewers without arguments is "
-               "not supported on Windows."
-            << std::endl;
-  return false;
-#else
-  for (const std::filesystem::path &stepFile : stepFiles) {
-    const pid_t child = fork();
-    if (child < 0) {
-      std::cerr << "Error: could not launch viewer for " << stepFile << ": "
-                << std::strerror(errno) << std::endl;
-      return false;
-    }
-    if (child == 0) {
-      char *childArguments[] = {
-          const_cast<char *>(programName),
-          const_cast<char *>(stepFile.c_str()),
-          nullptr,
-      };
-      execvp(programName, childArguments);
-      std::cerr << "Error: could not open " << stepFile << ": "
-                << std::strerror(errno) << std::endl;
-      _exit(127);
-    }
-    std::cout << "Opening " << stepFile << " (reloads independently)."
-              << std::endl;
-  }
   return true;
-#endif
 }
 
 // After the prefix, a root pair uses: <expression>_<expression>.
@@ -1157,9 +1140,8 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
 Handle(AIS_TexturedShape)
 MakeCheckerboardPresentation(const TopoDS_Face &face,
                              const CheckerboardTree &tree) {
-  const Handle(Geom_Plane) plane =
-      Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(face));
-  if (plane.IsNull()) {
+  const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+  if (surface.IsNull()) {
     return {};
   }
 
@@ -1168,14 +1150,33 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   Standard_Real vMin = 0.0;
   Standard_Real vMax = 0.0;
   BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
-  const Standard_Real uWidth = std::abs(uMax - uMin);
-  const Standard_Real vWidth = std::abs(vMax - vMin);
+  const Standard_Real uSpan = std::abs(uMax - uMin);
+  const Standard_Real vSpan = std::abs(vMax - vMin);
+  if (uSpan <= Precision::Confusion() || vSpan <= Precision::Confusion()) {
+    return {};
+  }
 
   GProp_GProps surfaceProperties;
   BRepGProp::SurfaceProperties(face, surfaceProperties);
   const Standard_Real area = surfaceProperties.Mass();
+  if (area <= Precision::SquareConfusion()) {
+    return {};
+  }
+
+  gp_Pnt surfacePoint;
+  gp_Vec derivativeU;
+  gp_Vec derivativeV;
+  try {
+    surface->D1((uMin + uMax) * 0.5, (vMin + vMax) * 0.5, surfacePoint,
+                derivativeU, derivativeV);
+  } catch (const Standard_Failure &) {
+    return {};
+  }
+  const Standard_Real uWidth = uSpan * derivativeU.Magnitude();
+  const Standard_Real vWidth = vSpan * derivativeV.Magnitude();
+  const gp_Vec surfaceNormal = derivativeU.Crossed(derivativeV);
   if (uWidth <= Precision::Confusion() || vWidth <= Precision::Confusion() ||
-      area <= Precision::SquareConfusion()) {
+      surfaceNormal.Magnitude() <= Precision::SquareConfusion()) {
     return {};
   }
 
@@ -1252,18 +1253,8 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
     }
   }
 
-  gp_Dir normal = plane->Pln().Axis().Direction();
-  if (face.Orientation() == TopAbs_REVERSED) {
-    normal.Reverse();
-  }
-  gp_Vec separation(normal);
-  separation *= std::max(uWidth, vWidth) * 1.0e-5;
-  gp_Trsf lift;
-  lift.SetTranslation(separation);
-  BRepBuilderAPI_Transform liftedFace(face, lift, Standard_True);
-
-  Handle(AIS_TexturedShape) presentation =
-      new AIS_TexturedShape(liftedFace.Shape());
+  Handle(AIS_TexturedShape) presentation = new AIS_TexturedShape(face);
+  presentation->SetPolygonOffsets(Aspect_POM_Fill, -1.0f, -1.0f);
   presentation->SetTexturePixMap(checkerTexture);
   presentation->SetTextureRepeat(Standard_False);
   presentation->SetTextureMapOn();
@@ -1282,7 +1273,8 @@ int main(int argc, char *argv[]) {
               << std::endl;
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
     std::cout << "       " << argv[0]
-              << "                 (open <directory-name>*.step)" << std::endl;
+              << "                 (open and auto-reload all ./*.step files)"
+              << std::endl;
     std::cout
         << "\tLeft click to jump with nvim-remote.sh\n"
            "\tShift-left click to query a vertex, otherwise face color\n"
@@ -1291,9 +1283,6 @@ int main(int argc, char *argv[]) {
            "\tESC to quit."
         << std::endl;
     return 0;
-  }
-  if (argc == 1) {
-    return LaunchMatchingStepViewers(argv[0]) ? 0 : 1;
   }
   if (argc > 4) {
     std::cout << "Usage: " << argv[0]
@@ -1385,12 +1374,26 @@ int main(int argc, char *argv[]) {
 #endif
   }
 
-  const std::filesystem::path stepPathInput(
-      cliModelPath.empty() ? argv[1] : cliModelPath);
-  const std::filesystem::path stepPathAbsolute =
-      std::filesystem::absolute(stepPathInput).lexically_normal();
+  std::vector<std::filesystem::path> stepPaths;
+  if (argc == 1) {
+    if (!CollectMatchingStepFiles(stepPaths)) {
+      return 1;
+    }
+  } else {
+    const std::filesystem::path stepPathInput(
+        cliModelPath.empty() ? argv[1] : cliModelPath);
+    stepPaths.push_back(stepPathInput);
+  }
+  for (std::filesystem::path &stepPath : stepPaths) {
+    stepPath = std::filesystem::absolute(stepPath).lexically_normal();
+  }
+  const std::filesystem::path stepPathAbsolute = stepPaths.front();
   const std::string stepPathForOcct = stepPathAbsolute.string();
-  const std::string watchedStepFilePath = NormalizePath(stepPathForOcct);
+  std::vector<std::string> watchedStepFilePaths;
+  watchedStepFilePaths.reserve(stepPaths.size());
+  for (const std::filesystem::path &stepPath : stepPaths) {
+    watchedStepFilePaths.push_back(NormalizePath(stepPath.string()));
+  }
 
   const std::filesystem::path watchRootPath =
       stepPathAbsolute.parent_path().empty() ? std::filesystem::current_path()
@@ -1499,15 +1502,7 @@ int main(int argc, char *argv[]) {
   const Standard_Boolean kApplyTintColor = Standard_False;
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
 
-  Handle(TDocStd_Document) doc;
-  Handle(XCAFDoc_ShapeTool) shapeTool;
-  Handle(XCAFDoc_ColorTool) colorTool;
-  TDF_Label rootLabel;
-  Handle(XCAFPrs_AISObject) xcafPresentation;
-  std::unordered_map<std::string, std::string> labelSourceByEntry;
-  ForwardNavigationData forwardNavigationData;
-  Handle(AIS_Shape) forwardNavHighlight;
-  std::vector<Handle(AIS_TexturedShape)> checkerboardPresentations;
+  std::vector<LoadedStepModel> models;
 
 #ifndef _WIN32
   int forwardNavSocketFd = -1;
@@ -1549,31 +1544,33 @@ int main(int argc, char *argv[]) {
     configurePbrMaterial(fillAspect);
   };
 
-  auto loadModelFromDisk = [&]() -> bool {
-    Handle(TDocStd_Document) newDoc;
-    app->NewDocument("BinXCAF", newDoc);
+  auto loadModelsFromDisk = [&]() -> bool {
+    std::vector<LoadedStepModel> newModels;
+    for (const std::filesystem::path &stepPath : stepPaths) {
+      LoadedStepModel newModel;
+      newModel.path = stepPath;
+      app->NewDocument("BinXCAF", newModel.document);
 
-    STEPCAFControl_Reader reader;
-    reader.SetColorMode(Standard_True);
-    reader.SetNameMode(Standard_True);
-    reader.SetLayerMode(Standard_True);
+      STEPCAFControl_Reader reader;
+      reader.SetColorMode(Standard_True);
+      reader.SetNameMode(Standard_True);
+      reader.SetLayerMode(Standard_True);
+      const std::string stepFilePath = stepPath.string();
+      if (reader.ReadFile(stepFilePath.c_str()) != IFSelect_RetDone) {
+        std::cerr << "Error: Unable to parse or read file: " << stepFilePath
+                  << std::endl;
+        app->Close(newModel.document);
+        for (LoadedStepModel &loadedModel : newModels) {
+          app->Close(loadedModel.document);
+        }
+        return false;
+      }
 
-    IFSelect_ReturnStatus readStatus = reader.ReadFile(stepPathForOcct.c_str());
-    if (readStatus != IFSelect_RetDone) {
-      std::cerr << "Error: Unable to parse or read file: " << stepPathForOcct
-                << std::endl;
-
-      app->Close(newDoc);
-      return false;
-    }
-
-    labelSourceByEntry.clear();
-    {
-      Handle(StepData_StepModel) model =
+      Handle(StepData_StepModel) stepModel =
           Handle(StepData_StepModel)::DownCast(reader.Reader().WS()->Model());
-      if (!model.IsNull()) {
+      if (!stepModel.IsNull()) {
         Handle(HeaderSection_FileDescription) fileDescription =
-            Handle(HeaderSection_FileDescription)::DownCast(model->HeaderEntity(
+            Handle(HeaderSection_FileDescription)::DownCast(stepModel->HeaderEntity(
                 STANDARD_TYPE(HeaderSection_FileDescription)));
         if (!fileDescription.IsNull()) {
           Handle(Interface_HArray1OfHAsciiString) descriptions =
@@ -1586,137 +1583,140 @@ int main(int argc, char *argv[]) {
               if (lineH.IsNull()) {
                 continue;
               }
-
-              const std::string line = lineH->ToCString();
               std::string entry;
               std::string source;
-              if (SplitEntryAndSourceLocation(line, entry, source)) {
-                labelSourceByEntry[entry] = source;
+              if (SplitEntryAndSourceLocation(lineH->ToCString(), entry,
+                                              source)) {
+                newModel.labelSourceByEntry[entry] = source;
               }
             }
           }
         }
       }
-    }
-    BuildForwardNavigationData(labelSourceByEntry, forwardNavigationData);
+      BuildForwardNavigationData(newModel.labelSourceByEntry,
+                                 newModel.forwardNavigationData);
 
-    if (!reader.Transfer(newDoc)) {
-      std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
-                   "the XCAF document framework."
-                << std::endl;
-      app->Close(newDoc);
-      return false;
-    }
-
-    Handle(XCAFDoc_ShapeTool) newShapeTool =
-        XCAFDoc_DocumentTool::ShapeTool(newDoc->Main());
-    Handle(XCAFDoc_ColorTool) newColorTool =
-        XCAFDoc_DocumentTool::ColorTool(newDoc->Main());
-    Handle(XCAFDoc_LayerTool) newLayerTool =
-        XCAFDoc_DocumentTool::LayerTool(newDoc->Main());
-
-    TDF_LabelSequence freeShapes;
-    newShapeTool->GetFreeShapes(freeShapes);
-    if (freeShapes.IsEmpty()) {
-      std::cerr << "Error: Document context yields no free structural "
-                   "components."
-                << std::endl;
-      app->Close(newDoc);
-      return false;
-    }
-
-    const TDF_Label newRootLabel = freeShapes.First();
-    std::vector<Handle(AIS_TexturedShape)> newCheckerboardPresentations;
-    TopoDS_Shape newRootShape;
-    if (newShapeTool->GetShape(newRootLabel, newRootShape)) {
-      for (TopExp_Explorer faceIt(newRootShape, TopAbs_FACE); faceIt.More();
-           faceIt.Next()) {
-        const TopoDS_Face face = TopoDS::Face(faceIt.Current());
-        TDF_Label faceLabel;
-        if (!newShapeTool->FindSubShape(newRootLabel, face, faceLabel)) {
-          continue;
+      if (!reader.Transfer(newModel.document)) {
+        std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
+                     "the XCAF document framework: "
+                  << stepFilePath << std::endl;
+        app->Close(newModel.document);
+        for (LoadedStepModel &loadedModel : newModels) {
+          app->Close(loadedModel.document);
         }
-        Handle(TColStd_HSequenceOfExtendedString) faceLayers =
-            newLayerTool->GetLayers(faceLabel);
-        CheckerboardTree tree;
-        bool hasCheckerboardColors = false;
-        if (!faceLayers.IsNull()) {
-          for (Standard_Integer i = faceLayers->Lower();
-               i <= faceLayers->Upper(); ++i) {
-            if (ParseCheckerboardLayer(faceLayers->Value(i), tree)) {
-              hasCheckerboardColors = true;
-              break;
+        return false;
+      }
+
+      newModel.shapeTool =
+          XCAFDoc_DocumentTool::ShapeTool(newModel.document->Main());
+      newModel.colorTool =
+          XCAFDoc_DocumentTool::ColorTool(newModel.document->Main());
+      Handle(XCAFDoc_LayerTool) layerTool =
+          XCAFDoc_DocumentTool::LayerTool(newModel.document->Main());
+      TDF_LabelSequence freeShapes;
+      newModel.shapeTool->GetFreeShapes(freeShapes);
+      if (freeShapes.IsEmpty()) {
+        std::cerr << "Error: Document context yields no free structural "
+                     "components in "
+                  << stepFilePath << std::endl;
+        app->Close(newModel.document);
+        for (LoadedStepModel &loadedModel : newModels) {
+          app->Close(loadedModel.document);
+        }
+        return false;
+      }
+
+      newModel.rootLabel = freeShapes.First();
+      TopoDS_Shape rootShape;
+      if (newModel.shapeTool->GetShape(newModel.rootLabel, rootShape)) {
+        for (TopExp_Explorer faceIt(rootShape, TopAbs_FACE); faceIt.More();
+             faceIt.Next()) {
+          const TopoDS_Face face = TopoDS::Face(faceIt.Current());
+          TDF_Label faceLabel;
+          if (!newModel.shapeTool->FindSubShape(newModel.rootLabel, face,
+                                                faceLabel)) {
+            continue;
+          }
+          Handle(TColStd_HSequenceOfExtendedString) faceLayers =
+              layerTool->GetLayers(faceLabel);
+          CheckerboardTree tree;
+          bool hasCheckerboardColors = false;
+          if (!faceLayers.IsNull()) {
+            for (Standard_Integer i = faceLayers->Lower();
+                 i <= faceLayers->Upper(); ++i) {
+              if (ParseCheckerboardLayer(faceLayers->Value(i), tree)) {
+                hasCheckerboardColors = true;
+                break;
+              }
             }
           }
+          if (!hasCheckerboardColors) {
+            continue;
+          }
+          Handle(AIS_TexturedShape) checkerboard =
+              MakeCheckerboardPresentation(face, tree);
+          if (checkerboard.IsNull()) {
+            std::cerr << "Warning: could not render marked checkerboard face in "
+                      << stepFilePath << std::endl;
+            continue;
+          }
+          newModel.checkerboardPresentations.push_back(checkerboard);
         }
-        if (!hasCheckerboardColors) {
-          continue;
-        }
+      }
+      newModel.presentation = new XCAFPrs_AISObject(newModel.rootLabel);
+      applyPresentationStyling(newModel.presentation);
+      newModels.push_back(std::move(newModel));
+    }
 
-        Handle(AIS_TexturedShape) checkerboard =
-            MakeCheckerboardPresentation(face, tree);
-        if (checkerboard.IsNull()) {
-          std::cerr << "Warning: could not render marked checkerboard face."
-                    << std::endl;
-          continue;
-        }
-        newCheckerboardPresentations.push_back(checkerboard);
+    std::vector<LoadedStepModel> oldModels = std::move(models);
+    for (LoadedStepModel &oldModel : oldModels) {
+      if (!oldModel.presentation.IsNull()) {
+        context->Remove(oldModel.presentation, Standard_False);
+      }
+      if (!oldModel.forwardNavHighlight.IsNull()) {
+        context->Remove(oldModel.forwardNavHighlight, Standard_False);
+      }
+      for (const Handle(AIS_TexturedShape) &checkerboard :
+           oldModel.checkerboardPresentations) {
+        context->Remove(checkerboard, Standard_False);
       }
     }
 
-    Handle(XCAFPrs_AISObject) newPresentation =
-        new XCAFPrs_AISObject(newRootLabel);
-    applyPresentationStyling(newPresentation);
-
-    Handle(TDocStd_Document) oldDoc = doc;
-    Handle(XCAFPrs_AISObject) oldPresentation = xcafPresentation;
-    std::vector<Handle(AIS_TexturedShape)> oldCheckerboards;
-    oldCheckerboards.swap(checkerboardPresentations);
-    checkerboardPresentations.swap(newCheckerboardPresentations);
-
-    doc = newDoc;
-    shapeTool = newShapeTool;
-    colorTool = newColorTool;
-    rootLabel = newRootLabel;
-    xcafPresentation = newPresentation;
-
-    if (!oldPresentation.IsNull()) {
-      context->Remove(oldPresentation, Standard_False);
+    models = std::move(newModels);
+    for (LoadedStepModel &loadedModel : models) {
+      context->Display(loadedModel.presentation, AIS_Shaded, 0, Standard_False);
+      context->SetSelectionModeActive(loadedModel.presentation, 0,
+                                      Standard_False);
+      context->SetSelectionModeActive(loadedModel.presentation, 4,
+                                      Standard_True);
+      context->SetTransparency(loadedModel.presentation, kModelTransparency,
+                               Standard_False);
+      if (kApplyTintColor) {
+        context->SetColor(loadedModel.presentation, kTintColor, Standard_False);
+      }
+      for (const Handle(AIS_TexturedShape) &checkerboard :
+           loadedModel.checkerboardPresentations) {
+        context->Display(checkerboard, 3, 0, Standard_False);
+        context->Deactivate(checkerboard);
+      }
     }
-    for (const Handle(AIS_TexturedShape) &oldCheckerboard : oldCheckerboards) {
-      context->Remove(oldCheckerboard, Standard_False);
+    for (LoadedStepModel &oldModel : oldModels) {
+      if (!oldModel.document.IsNull()) {
+        app->Close(oldModel.document);
+      }
     }
-
-    context->Display(xcafPresentation, AIS_Shaded, 0, Standard_True);
-    context->SetSelectionModeActive(xcafPresentation, 0, Standard_False);
-    context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
-    context->SetTransparency(xcafPresentation, kModelTransparency,
-                             Standard_False);
-    if (kApplyTintColor) {
-      context->SetColor(xcafPresentation, kTintColor, Standard_False);
-    }
-    for (const Handle(AIS_TexturedShape) &checkerboard :
-         checkerboardPresentations) {
-      context->Display(checkerboard, 3, 0, Standard_False);
-      context->Deactivate(checkerboard);
-    }
-
     view->FitAll();
     view->ZFitAll();
-    if (!forwardNavHighlight.IsNull()) {
-      context->Remove(forwardNavHighlight, Standard_False);
-      forwardNavHighlight.Nullify();
-    }
     context->UpdateCurrentViewer();
-
-    if (!oldDoc.IsNull()) {
-      app->Close(oldDoc);
-    }
-
     return true;
   };
-
-  if (!loadModelFromDisk()) {
+  auto setSelectionModes = [&](const bool vertexMode, const bool faceMode) {
+    for (LoadedStepModel &loadedModel : models) {
+      context->SetSelectionModeActive(loadedModel.presentation, 1, vertexMode);
+      context->SetSelectionModeActive(loadedModel.presentation, 4, faceMode);
+    }
+  };
+  if (!loadModelsFromDisk()) {
     glfwTerminate();
     return 1;
   }
@@ -1766,7 +1766,7 @@ int main(int argc, char *argv[]) {
   context->UpdateCurrentViewer();
 
   std::atomic_bool reloadRequested(false);
-  ModelWatchContext watchContext{&reloadRequested, watchedStepFilePath};
+  ModelWatchContext watchContext{&reloadRequested, watchedStepFilePaths};
   MouseScrollContext scrollContext;
   glfwSetWindowUserPointer(occtWindow->getGlfwWindow(), &scrollContext);
   glfwSetScrollCallback(occtWindow->getGlfwWindow(), OnMouseScroll);
@@ -1831,20 +1831,47 @@ int main(int argc, char *argv[]) {
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
                          &lastFbHeight);
 
-  auto getRootShape = [&](TopoDS_Shape &rootShapeOut) {
-    return !shapeTool.IsNull() &&
-           shapeTool->GetShape(rootLabel, rootShapeOut) &&
+  auto findModelByPath = [&](const std::string &modelPath) -> LoadedStepModel * {
+    std::error_code pathError;
+    const std::string absoluteModelPath = NormalizePath(
+        std::filesystem::absolute(modelPath, pathError).lexically_normal().string());
+    if (pathError) {
+      return nullptr;
+    }
+    const std::string requestedFilename =
+        std::filesystem::path(modelPath).filename().string();
+    LoadedStepModel *filenameMatch = nullptr;
+    for (LoadedStepModel &loadedModel : models) {
+      if (NormalizePath(loadedModel.path.string()) == absoluteModelPath) {
+        return &loadedModel;
+      }
+      if (loadedModel.path.filename().string() == requestedFilename) {
+        if (filenameMatch != nullptr) {
+          return nullptr;
+        }
+        filenameMatch = &loadedModel;
+      }
+    }
+    return filenameMatch;
+  };
+
+  auto getRootShape = [&](const LoadedStepModel &loadedModel,
+                          TopoDS_Shape &rootShapeOut) {
+    return !loadedModel.shapeTool.IsNull() &&
+           loadedModel.shapeTool->GetShape(loadedModel.rootLabel, rootShapeOut) &&
            !rootShapeOut.IsNull();
   };
 
-  auto vertexEntry = [&](const Standard_Integer vertexIndex) {
+  auto vertexEntry = [&](const LoadedStepModel &loadedModel,
+                         const Standard_Integer vertexIndex) {
     TCollection_AsciiString rootEntry;
-    TDF_Tool::Entry(rootLabel, rootEntry);
+    TDF_Tool::Entry(loadedModel.rootLabel, rootEntry);
     return std::string(rootEntry.ToCString()) + ":v" +
            std::to_string(vertexIndex);
   };
 
-  auto printVertexReplay = [&](const TopoDS_Shape &rootShape,
+  auto printVertexReplay = [&](const LoadedStepModel &loadedModel,
+                               const TopoDS_Shape &rootShape,
                                const Standard_Integer vertexIndex,
                                const gp_Pnt &stabPoint, const bool hasStab,
                                const bool includeEntry) {
@@ -1852,12 +1879,11 @@ int main(int argc, char *argv[]) {
     if (!FindVertexByIndex(rootShape, vertexIndex, vertex)) {
       return false;
     }
-
     const gp_Pnt vertexPoint = BRep_Tool::Pnt(vertex);
     if (includeEntry) {
       const std::string modelEntry =
-          std::filesystem::path(stepPathForOcct).filename().string() + ":" +
-          vertexEntry(vertexIndex);
+          loadedModel.path.filename().string() + ":" +
+          vertexEntry(loadedModel, vertexIndex);
       std::cout << modelEntry << ' ';
     }
     std::cout << "snap:" << vertexPoint.X() << ',' << vertexPoint.Y() << ','
@@ -1872,11 +1898,16 @@ int main(int argc, char *argv[]) {
 
   auto applyVertexReplayQuery = [&](const std::string &rawQueryLine) {
     VertexReplayQuery query;
+    if (!ParseVertexReplayQuery(rawQueryLine, query)) {
+      std::cerr << "Vertex replay ignored (query='" << rawQueryLine << "')"
+                << std::endl;
+      return;
+    }
+    LoadedStepModel *loadedModel = findModelByPath(query.modelPath);
     TopoDS_Shape rootShape;
-    if (!ParseVertexReplayQuery(rawQueryLine, query) ||
-        !getRootShape(rootShape) ||
-        !printVertexReplay(rootShape, query.vertexIndex, gp_Pnt(), false,
-                           false)) {
+    if (loadedModel == nullptr || !getRootShape(*loadedModel, rootShape) ||
+        !printVertexReplay(*loadedModel, rootShape, query.vertexIndex, gp_Pnt(),
+                           false, false)) {
       std::cerr << "Vertex replay ignored (query='" << rawQueryLine << "')"
                 << std::endl;
     }
@@ -1884,15 +1915,22 @@ int main(int argc, char *argv[]) {
 
   auto applyMouseReplayQuery = [&](const std::string &rawQueryLine) {
     MouseReplayQuery query;
+    if (!ParseMouseReplayQuery(rawQueryLine, query)) {
+      return false;
+    }
+    LoadedStepModel *loadedModel = findModelByPath(query.modelPath);
     TopoDS_Shape rootShape;
-    if (!ParseMouseReplayQuery(rawQueryLine, query) ||
-        !getRootShape(rootShape)) {
+    if (loadedModel == nullptr || !getRootShape(*loadedModel, rootShape)) {
       return false;
     }
 
     ApplyCameraState(view, query.camera);
-    context->SetSelectionModeActive(xcafPresentation, 4, Standard_False);
-    context->SetSelectionModeActive(xcafPresentation, 1, Standard_True);
+    for (LoadedStepModel &candidate : models) {
+      context->SetSelectionModeActive(candidate.presentation, 4,
+                                      Standard_False);
+      context->SetSelectionModeActive(candidate.presentation, 1,
+                                      &candidate == loadedModel);
+    }
     context->UpdateCurrentViewer();
     context->MoveTo(query.mouseX, query.mouseY, view, Standard_True);
     context->SelectDetected();
@@ -1912,8 +1950,10 @@ int main(int argc, char *argv[]) {
     }
 
     gp_Pnt stabPoint;
-    if (!FindMouseRayHit(view, query.mouseX, query.mouseY, rootShape,
-                         stabPoint)) {
+    const bool hasRayHit = FindMouseRayHit(view, query.mouseX, query.mouseY,
+                                           rootShape, stabPoint);
+    setSelectionModes(wasShiftPressed, !wasShiftPressed);
+    if (!hasRayHit) {
       std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
                 << "')" << std::endl;
       return false;
@@ -1922,7 +1962,8 @@ int main(int argc, char *argv[]) {
       vertexIndex = FindNearestVertexIndex(rootShape, stabPoint, 1.0e-6);
     }
     if (vertexIndex == 0 ||
-        !printVertexReplay(rootShape, vertexIndex, stabPoint, true, true)) {
+        !printVertexReplay(*loadedModel, rootShape, vertexIndex, stabPoint,
+                           true, true)) {
       std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
                 << "')" << std::endl;
       return false;
@@ -1941,25 +1982,40 @@ int main(int argc, char *argv[]) {
       return;
     }
 
+    bool found = false;
     std::string resolvedSource;
     std::vector<std::string> resolvedEntries;
-    if (!ResolveForwardNavigationQuery(forwardNavigationData, query,
-                                       resolvedSource, resolvedEntries)) {
+    for (LoadedStepModel &loadedModel : models) {
+      std::string modelResolvedSource;
+      std::vector<std::string> modelResolvedEntries;
+      if (ResolveForwardNavigationQuery(loadedModel.forwardNavigationData, query,
+                                        modelResolvedSource,
+                                        modelResolvedEntries)) {
+        found = true;
+        if (resolvedSource.empty()) {
+          resolvedSource = modelResolvedSource;
+        }
+        HighlightFacesForEntries(modelResolvedEntries, loadedModel.document,
+                                 loadedModel.shapeTool, context, view,
+                                 loadedModel.forwardNavHighlight);
+        resolvedEntries.insert(resolvedEntries.end(),
+                               modelResolvedEntries.begin(),
+                               modelResolvedEntries.end());
+      } else {
+        HighlightFacesForEntries({}, loadedModel.document,
+                                 loadedModel.shapeTool, context, view,
+                                 loadedModel.forwardNavHighlight);
+      }
+    }
+    if (!found) {
       std::cerr << "Forward navigation: no mapped face for "
                 << canonicalQuerySource << std::endl;
-      HighlightFacesForEntries({}, doc, shapeTool, context, view,
-                               forwardNavHighlight);
       return;
     }
 
-    HighlightFacesForEntries(resolvedEntries, doc, shapeTool, context, view,
-                             forwardNavHighlight);
-    if (!forwardNavHighlight.IsNull()) {
-      view->FitAll();
-      view->ZFitAll();
-      context->UpdateCurrentViewer();
-    }
-
+    view->FitAll();
+    view->ZFitAll();
+    context->UpdateCurrentViewer();
     std::cout << "Forward navigation: " << canonicalQuerySource << " -> "
               << resolvedSource;
     if (!resolvedEntries.empty()) {
@@ -2052,8 +2108,8 @@ int main(int argc, char *argv[]) {
     }
 
     if (reloadRequested.exchange(false, std::memory_order_acquire)) {
-      if (loadModelFromDisk()) {
-        std::cout << "Model reloaded from disk." << std::endl;
+      if (loadModelsFromDisk()) {
+        std::cout << "STEP models reloaded from disk." << std::endl;
       } else {
         std::cerr << "Model reload failed; keeping previous scene."
                   << std::endl;
@@ -2098,8 +2154,7 @@ int main(int argc, char *argv[]) {
                                 glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
     if (isShiftPressed != wasShiftPressed) {
-      context->SetSelectionModeActive(xcafPresentation, 4, !isShiftPressed);
-      context->SetSelectionModeActive(xcafPresentation, 1, isShiftPressed);
+      setSelectionModes(isShiftPressed, !isShiftPressed);
       context->UpdateCurrentViewer();
       modifierHelpLabel->SetColor(isShiftPressed ? activeHelpTextColor
                                                  : helpTextColor);
@@ -2160,8 +2215,7 @@ int main(int argc, char *argv[]) {
            ++selectionPass) {
         const bool vertexPass = isShiftPressed && selectionPass == 0;
         if (selectionPass > 0) {
-          context->SetSelectionModeActive(xcafPresentation, 1, Standard_False);
-          context->SetSelectionModeActive(xcafPresentation, 4, Standard_True);
+          setSelectionModes(false, true);
           context->UpdateCurrentViewer();
           context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
                           view, Standard_True);
@@ -2173,9 +2227,24 @@ int main(int argc, char *argv[]) {
           Handle(StdSelect_BRepOwner) brepOwner =
               Handle(StdSelect_BRepOwner)::DownCast(owner);
 
-          if (brepOwner.IsNull() || shapeTool.IsNull() || colorTool.IsNull()) {
+          if (brepOwner.IsNull()) {
             continue;
           }
+          LoadedStepModel *selectedModel = nullptr;
+          for (LoadedStepModel &candidate : models) {
+            if (owner->IsSameSelectable(candidate.presentation)) {
+              selectedModel = &candidate;
+              break;
+            }
+          }
+          if (selectedModel == nullptr || selectedModel->shapeTool.IsNull() ||
+              selectedModel->colorTool.IsNull()) {
+            continue;
+          }
+          const Handle(XCAFDoc_ShapeTool) &shapeTool = selectedModel->shapeTool;
+          const Handle(XCAFDoc_ColorTool) &colorTool = selectedModel->colorTool;
+          const TDF_Label &rootLabel = selectedModel->rootLabel;
+          const auto &labelSourceByEntry = selectedModel->labelSourceByEntry;
 
           TopoDS_Shape pickedShape = brepOwner->Shape();
           const bool isVertex = pickedShape.ShapeType() == TopAbs_VERTEX;
@@ -2224,8 +2293,7 @@ int main(int argc, char *argv[]) {
             view->Project(vertexPoint.X(), vertexPoint.Y(), vertexPoint.Z(),
                           screenX, screenY);
             const std::string modelEntry =
-                std::filesystem::path(stepPathForOcct).filename().string() +
-                ":" + pickedEntryStr;
+                selectedModel->path.filename().string() + ":" + pickedEntryStr;
             TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
             TopExp::MapShapesAndAncestors(rootShape, TopAbs_VERTEX, TopAbs_FACE,
                                           vertexFaces);
@@ -2325,6 +2393,9 @@ int main(int argc, char *argv[]) {
             break;
           }
 
+          if (models.size() > 1) {
+            std::cout << selectedModel->path.filename().string() << ":";
+          }
           std::cout << pickedEntryStr;
           const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
           if (sourceIt != labelSourceByEntry.end()) {
@@ -2342,8 +2413,7 @@ int main(int argc, char *argv[]) {
         }
       }
       if (isShiftPressed) {
-        context->SetSelectionModeActive(xcafPresentation, 4, Standard_False);
-        context->SetSelectionModeActive(xcafPresentation, 1, Standard_True);
+        setSelectionModes(true, false);
         context->UpdateCurrentViewer();
         context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
                         view, Standard_True);
@@ -2376,8 +2446,10 @@ int main(int argc, char *argv[]) {
   std::filesystem::remove(socketPath, removeEc);
 #endif
 
-  if (!doc.IsNull()) {
-    app->Close(doc); // calls glfwTerminate() no need to add it below
+  for (LoadedStepModel &loadedModel : models) {
+    if (!loadedModel.document.IsNull()) {
+      app->Close(loadedModel.document);
+    }
   }
   return 0;
 }
