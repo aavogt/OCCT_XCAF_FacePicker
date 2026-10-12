@@ -206,6 +206,7 @@ struct LoadedStepModel {
   ForwardNavigationData forwardNavigationData;
   Handle(AIS_Shape) forwardNavHighlight;
   std::vector<Handle(AIS_TexturedShape)> checkerboardPresentations;
+  bool visible = true;
 };
 
 #ifndef _WIN32
@@ -1276,10 +1277,12 @@ int main(int argc, char *argv[]) {
               << "                 (open and auto-reload all ./*.step files)"
               << std::endl;
     std::cout
-        << "\tLeft click to jump with nvim-remote.sh\n"
+        << "\tLeft click to select a file or jump to source\n"
            "\tShift-left click to query a vertex, otherwise face color\n"
            "\tMiddle click to pan\n\tRight click to rotate\n"
-           "\tSpace to print camera state\n\tH to cycle on-screen help modes\n"
+           "\tUp/Down to select a file (wrap)\n"
+           "\tSpace to toggle selected file visibility; T to toggle file list\n"
+           "\tC to print camera state\n\tH to cycle on-screen help modes\n"
            "\tESC to quit."
         << std::endl;
     return 0;
@@ -1503,6 +1506,9 @@ int main(int argc, char *argv[]) {
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
 
   std::vector<LoadedStepModel> models;
+  std::size_t selectedModelIndex = 0;
+  bool modelListVisible = true;
+  bool wasShiftPressed = false;
 
 #ifndef _WIN32
   int forwardNavSocketFd = -1;
@@ -1668,6 +1674,14 @@ int main(int argc, char *argv[]) {
       newModels.push_back(std::move(newModel));
     }
 
+    for (LoadedStepModel &newModel : newModels) {
+      for (const LoadedStepModel &oldModel : models) {
+        if (newModel.path == oldModel.path) {
+          newModel.visible = oldModel.visible;
+          break;
+        }
+      }
+    }
     std::vector<LoadedStepModel> oldModels = std::move(models);
     for (LoadedStepModel &oldModel : oldModels) {
       if (!oldModel.presentation.IsNull()) {
@@ -1683,8 +1697,18 @@ int main(int argc, char *argv[]) {
     }
 
     models = std::move(newModels);
+    if (!models.empty()) {
+      selectedModelIndex %= models.size();
+    }
     for (LoadedStepModel &loadedModel : models) {
-      context->Display(loadedModel.presentation, AIS_Shaded, 0, Standard_False);
+      if (loadedModel.visible) {
+        context->Display(loadedModel.presentation, AIS_Shaded, 0, Standard_False);
+        for (const Handle(AIS_TexturedShape) &checkerboard :
+             loadedModel.checkerboardPresentations) {
+          context->Display(checkerboard, 3, 0, Standard_False);
+          context->Deactivate(checkerboard);
+        }
+      }
       context->SetSelectionModeActive(loadedModel.presentation, 0,
                                       Standard_False);
       context->SetSelectionModeActive(loadedModel.presentation, 4,
@@ -1693,11 +1717,6 @@ int main(int argc, char *argv[]) {
                                Standard_False);
       if (kApplyTintColor) {
         context->SetColor(loadedModel.presentation, kTintColor, Standard_False);
-      }
-      for (const Handle(AIS_TexturedShape) &checkerboard :
-           loadedModel.checkerboardPresentations) {
-        context->Display(checkerboard, 3, 0, Standard_False);
-        context->Deactivate(checkerboard);
       }
     }
     for (LoadedStepModel &oldModel : oldModels) {
@@ -1740,15 +1759,57 @@ int main(int argc, char *argv[]) {
     context->Display(label, Standard_False);
     return label;
   };
+  const Quantity_Color modelListColor(0.88, 0.88, 0.88, Quantity_TOC_RGB);
+  const Quantity_Color selectedModelColor(1.0, 1.0, 1.0, Quantity_TOC_RGB);
+  const Quantity_Color hiddenModelColor(0.42, 0.42, 0.42, Quantity_TOC_RGB);
+  std::vector<Handle(AIS_TextLabel)> modelListLabels;
+  modelListLabels.reserve(models.size());
+  for (std::size_t i = 0; i < models.size(); ++i) {
+    Handle(AIS_TextLabel) label = new AIS_TextLabel();
+    label->SetPosition(gp_Pnt(0.0, 0.0, 0.0));
+    label->SetOwnAnchorPoint(Standard_True);
+    label->SetHJustification(Graphic3d_HTA_RIGHT);
+    label->SetVJustification(Graphic3d_VTA_TOPFIRSTLINE);
+    label->SetHeight(16.0);
+    label->SetZLayer(Graphic3d_ZLayerId_TopOSD);
+    label->SetTransformPersistence(new Graphic3d_TransformPers(
+        Graphic3d_TMF_2d, Aspect_TOTP_RIGHT_UPPER,
+        Graphic3d_Vec2i(14, 14 + static_cast<Standard_Integer>(i) * 22)));
+    modelListLabels.push_back(label);
+    context->Display(label, Standard_False);
+  }
+  auto refreshModelListLabels = [&]() {
+    for (std::size_t i = 0; i < modelListLabels.size(); ++i) {
+      const bool isSelected = i == selectedModelIndex;
+      const LoadedStepModel &model = models[i];
+      const std::string text =
+          (isSelected ? "> " : "  ") + model.path.filename().string();
+      modelListLabels[i]->SetText(TCollection_ExtendedString(text.c_str()));
+      modelListLabels[i]->SetColor(
+          model.visible ? (isSelected ? selectedModelColor : modelListColor)
+                        : hiddenModelColor);
+      context->Redisplay(modelListLabels[i], Standard_False);
+      if (modelListVisible && models.size() > 1) {
+        context->Display(modelListLabels[i], Standard_False);
+      } else {
+        context->Erase(modelListLabels[i], Standard_False);
+      }
+    }
+  };
+  refreshModelListLabels();
+
 
   const std::vector<const char *> helpKeys = {
-      "Left click", "Shift+LMB", "Middle drag", "Right drag",
-      "Space",      "H",         "Esc"};
+      "Left click", "Shift+LMB", "Middle drag", "Right drag", "Up/Down",
+      "Space",      "T",         "C",           "H",          "Esc"};
   const std::vector<const char *> helpDescriptions = {
-      "jump to source",
+      "select file / jump to source",
       "vertex query; face color fallback",
       "pan",
       "rotate",
+      "select file (wrap)",
+      "toggle selected file visibility",
+      "toggle file list",
       "print camera state",
       "cycle help modes",
       "quit"};
@@ -1817,8 +1878,11 @@ int main(int argc, char *argv[]) {
   bool wasLeftPressed = false;
   bool wasRightPressed = false;
   bool wasMiddlePressed = false;
-  bool wasShiftPressed = false;
   bool wasSpacePressed = false;
+  bool wasCameraPressed = false;
+  bool wasUpPressed = false;
+  bool wasDownPressed = false;
+  bool wasListTogglePressed = false;
   bool wasHelpTogglePressed = false;
 
   double rotateStartX = 0.0;
@@ -2059,11 +2123,80 @@ int main(int argc, char *argv[]) {
   while (!glfwWindowShouldClose(occtWindow->getGlfwWindow())) {
     glfwWaitEventsTimeout(0.1);
 
-    const bool isSpacePressed =
-        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
-    if (isSpacePressed && !wasSpacePressed) {
+    const bool isCameraPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_C) == GLFW_PRESS;
+    if (isCameraPressed && !wasCameraPressed) {
       std::cout << SerializeCameraState(view) << std::endl;
     }
+
+    const bool isSpacePressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
+    if (isSpacePressed && !wasSpacePressed && models.size() > 1) {
+      LoadedStepModel &selectedModel = models[selectedModelIndex];
+      selectedModel.visible = !selectedModel.visible;
+      if (selectedModel.visible) {
+        context->Display(selectedModel.presentation, AIS_Shaded, 0,
+                         Standard_False);
+        context->SetSelectionModeActive(selectedModel.presentation, 0,
+                                        Standard_False);
+        context->SetSelectionModeActive(selectedModel.presentation, 1,
+                                        wasShiftPressed);
+        context->SetSelectionModeActive(selectedModel.presentation, 4,
+                                        !wasShiftPressed);
+        for (const Handle(AIS_TexturedShape) &checkerboard :
+             selectedModel.checkerboardPresentations) {
+          context->Display(checkerboard, 3, 0, Standard_False);
+          context->Deactivate(checkerboard);
+        }
+        if (!selectedModel.forwardNavHighlight.IsNull()) {
+          context->Display(selectedModel.forwardNavHighlight, Standard_False);
+        }
+      } else {
+        context->Erase(selectedModel.presentation, Standard_False);
+        if (!selectedModel.forwardNavHighlight.IsNull()) {
+          context->Erase(selectedModel.forwardNavHighlight, Standard_False);
+        }
+        for (const Handle(AIS_TexturedShape) &checkerboard :
+             selectedModel.checkerboardPresentations) {
+          context->Erase(checkerboard, Standard_False);
+        }
+      }
+      refreshModelListLabels();
+      context->UpdateCurrentViewer();
+      dirty = true;
+    }
+
+    const bool isUpPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_UP) == GLFW_PRESS;
+    const bool isDownPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_DOWN) == GLFW_PRESS;
+    if (models.size() > 1 &&
+        ((isUpPressed && !wasUpPressed) ||
+         (isDownPressed && !wasDownPressed))) {
+      if (isUpPressed && !wasUpPressed) {
+        selectedModelIndex =
+            (selectedModelIndex + models.size() - 1) % models.size();
+      } else {
+        selectedModelIndex = (selectedModelIndex + 1) % models.size();
+      }
+      refreshModelListLabels();
+      context->UpdateCurrentViewer();
+      dirty = true;
+    }
+
+    const bool isListTogglePressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_T) == GLFW_PRESS;
+    if (models.size() > 1 && isListTogglePressed && !wasListTogglePressed) {
+      modelListVisible = !modelListVisible;
+      refreshModelListLabels();
+      context->UpdateCurrentViewer();
+      dirty = true;
+    }
+
+    wasCameraPressed = isCameraPressed;
+    wasUpPressed = isUpPressed;
+    wasDownPressed = isDownPressed;
+    wasListTogglePressed = isListTogglePressed;
 
     const bool isHelpTogglePressed =
         glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_H) == GLFW_PRESS;
@@ -2109,6 +2242,7 @@ int main(int argc, char *argv[]) {
 
     if (reloadRequested.exchange(false, std::memory_order_acquire)) {
       if (loadModelsFromDisk()) {
+        refreshModelListLabels();
         std::cout << "STEP models reloaded from disk." << std::endl;
       } else {
         std::cerr << "Model reload failed; keeping previous scene."
@@ -2174,6 +2308,32 @@ int main(int argc, char *argv[]) {
     const bool isMiddlePressed =
         glfwGetMouseButton(occtWindow->getGlfwWindow(),
                            GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+    bool selectedListRowClick = false;
+    if (isLeftPressed && !wasLeftPressed && !isShiftPressed &&
+        models.size() > 1 && modelListVisible && !isRightPressed &&
+        !isMiddlePressed) {
+      int windowWidth = 0;
+      int windowHeight = 0;
+      glfwGetWindowSize(occtWindow->getGlfwWindow(), &windowWidth,
+                        &windowHeight);
+      (void)windowHeight;
+      for (std::size_t i = 0; i < models.size(); ++i) {
+        const std::string basename = models[i].path.filename().string();
+        const double rowWidth = std::min(
+            static_cast<double>(windowWidth),
+            18.0 + static_cast<double>(basename.size() + 2) * 10.0);
+        const double rowTop = 14.0 + static_cast<double>(i) * 22.0;
+        if (mouseX >= static_cast<double>(windowWidth) - rowWidth &&
+            mouseY >= rowTop - 4.0 && mouseY < rowTop + 18.0) {
+          selectedModelIndex = i;
+          selectedListRowClick = true;
+          refreshModelListLabels();
+          context->UpdateCurrentViewer();
+          dirty = true;
+          break;
+        }
+      }
+    }
 
     // Right mouse drag: orbit/rotate camera.
     if (isRightPressed) {
@@ -2206,7 +2366,7 @@ int main(int argc, char *argv[]) {
 
     // Modifier-left-click prefers a vertex, then falls back to face color.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
-        !isMiddlePressed) {
+        !isMiddlePressed && !selectedListRowClick) {
       context->SelectDetected();
 
       const int selectionPassCount = isShiftPressed ? 2 : 1;
