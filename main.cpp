@@ -44,9 +44,9 @@
 #include <XSControl_WorkSession.hxx>
 // OCCT Core / Framework Data
 #include <BinXCAFDrivers.hxx>
+#include <TColStd_HSequenceOfExtendedString.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
-#include <TColStd_HSequenceOfExtendedString.hxx>
 #include <TDF_Label.hxx>
 #include <TDF_Tool.hxx>
 #include <TDocStd_Application.hxx>
@@ -67,17 +67,17 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_LightSource.hxx>
 #include <AIS_Shape.hxx>
-#include <AIS_TexturedShape.hxx>
 #include <AIS_TextLabel.hxx>
+#include <AIS_TexturedShape.hxx>
 #include <Aspect_DisplayConnection.hxx>
-#include <Aspect_TypeOfLine.hxx>
 #include <Aspect_PolygonOffsetMode.hxx>
+#include <Aspect_TypeOfLine.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_NameOfTextureEnv.hxx>
+#include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_TextureEnv.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_TypeOfShadingModel.hxx>
-#include <Graphic3d_MaterialAspect.hxx>
-#include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <Image_Format.hxx>
 #include <Image_PixMap.hxx>
@@ -93,15 +93,15 @@
 #include <XCAFPrs_AISObject.hxx>
 
 // Modeling & Structural Helpers
-#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepGProp.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
-#include <Quantity_Color.hxx>
 #include <Geom_Surface.hxx>
 #include <Precision.hxx>
+#include <Quantity_Color.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -207,6 +207,7 @@ struct LoadedStepModel {
   Handle(AIS_Shape) forwardNavHighlight;
   std::vector<Handle(AIS_TexturedShape)> checkerboardPresentations;
   bool visible = true;
+  double transparency = 0.0;
 };
 
 #ifndef _WIN32
@@ -1003,8 +1004,8 @@ bool CollectMatchingStepFiles(std::vector<std::filesystem::path> &stepFiles) {
 
   std::sort(stepFiles.begin(), stepFiles.end());
   if (stepFiles.empty()) {
-    std::cerr << "Error: no STEP files matching *.step in "
-              << workingDirectory << std::endl;
+    std::cerr << "Error: no STEP files matching *.step in " << workingDirectory
+              << std::endl;
     return false;
   }
   return true;
@@ -1139,8 +1140,8 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
 }
 
 Handle(AIS_TexturedShape)
-MakeCheckerboardPresentation(const TopoDS_Face &face,
-                             const CheckerboardTree &tree) {
+    MakeCheckerboardPresentation(const TopoDS_Face &face,
+                                 const CheckerboardTree &tree) {
   const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
   if (surface.IsNull()) {
     return {};
@@ -1185,10 +1186,11 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   // The plane's U/V axes rotate the pattern with the face instead of world XYZ.
   const Standard_Real targetCellWidth = std::sqrt(area) / 4.0;
   constexpr Standard_Integer kMaxCellsPerSide = 64;
-  const auto cellCount = [targetCellWidth, kMaxCellsPerSide](Standard_Real extent) {
-    return static_cast<Standard_Integer>(std::clamp(
-        std::lround(extent / targetCellWidth), 1L,
-        static_cast<long>(kMaxCellsPerSide)));
+  const auto cellCount = [targetCellWidth,
+                          kMaxCellsPerSide](Standard_Real extent) {
+    return static_cast<Standard_Integer>(
+        std::clamp(std::lround(extent / targetCellWidth), 1L,
+                   static_cast<long>(kMaxCellsPerSide)));
   };
   const Standard_Integer cellsU = cellCount(uWidth);
   const Standard_Integer cellsV = cellCount(vWidth);
@@ -1199,16 +1201,15 @@ MakeCheckerboardPresentation(const TopoDS_Face &face,
   const Standard_Integer maxNestedScale =
       kMaxTextureDimension / (maxBaseCells * kMinPixelsPerCell);
   Standard_Integer nestedScale = 1;
-  for (Standard_Integer nestedDepth = 0;
-       nestedDepth < tree.maxNestedDepth; ++nestedDepth) {
+  for (Standard_Integer nestedDepth = 0; nestedDepth < tree.maxNestedDepth;
+       ++nestedDepth) {
     if (nestedScale > maxNestedScale / 4) {
       break;
     }
     nestedScale *= 4;
   }
   const Standard_Integer pixelsPerCell = std::min(
-      kMaxPixelsPerCell,
-      kMaxTextureDimension / (maxBaseCells * nestedScale));
+      kMaxPixelsPerCell, kMaxTextureDimension / (maxBaseCells * nestedScale));
   const Standard_Integer rootCellPixels = nestedScale * pixelsPerCell;
   const Standard_Integer textureWidth = cellsU * rootCellPixels;
   const Standard_Integer textureHeight = cellsV * rootCellPixels;
@@ -1276,15 +1277,18 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0]
               << "                 (open and auto-reload all ./*.step files)"
               << std::endl;
-    std::cout
-        << "\tLeft click to select a file or jump to source\n"
-           "\tShift-left click to query a vertex, otherwise face color\n"
-           "\tMiddle click to pan\n\tRight click to rotate\n"
-           "\tUp/Down to select a file (wrap)\n"
-           "\tSpace to toggle selected file visibility; T to toggle file list\n"
-           "\tC to print camera state\n\tH to cycle on-screen help modes\n"
-           "\tESC to quit."
-        << std::endl;
+    std::cout << "\tHover a model to point `>` at its STEP file\n"
+                 "\tClick a basename to toggle visibility; drag it >5px to "
+                 "adjust transparency\n"
+                 "\tShift+wheel adjusts focused-file transparency; wheel "
+                 "zooms\n"
+                 "\tLeft click a model to jump to source; Shift-left for "
+                 "vertex query\n"
+                 "\tMiddle click to pan\n\tRight click to rotate\n"
+                 "\tUp/Down to select a file (wrap); Space toggles visibility\n"
+                 "\tT to toggle file list\n\tC to print camera state\n"
+                 "\tH to cycle on-screen help modes\n\tESC to quit."
+              << std::endl;
     return 0;
   }
   if (argc > 4) {
@@ -1472,7 +1476,8 @@ int main(int argc, char *argv[]) {
     break;
   }
 
-  auto configurePbrMaterial = [](const Handle(Graphic3d_AspectFillArea3d) &aspect) {
+  auto configurePbrMaterial = [](const Handle(Graphic3d_AspectFillArea3d) &
+                                 aspect) {
     if (aspect.IsNull()) {
       return;
     }
@@ -1501,7 +1506,6 @@ int main(int argc, char *argv[]) {
   }
   configurePbrMaterial(defaultShadingAspect->Aspect());
 
-  const Standard_Real kModelTransparency = 0.0; // 0.0 = opaque, 1.0 = invisible
   const Standard_Boolean kApplyTintColor = Standard_False;
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
 
@@ -1576,8 +1580,9 @@ int main(int argc, char *argv[]) {
           Handle(StepData_StepModel)::DownCast(reader.Reader().WS()->Model());
       if (!stepModel.IsNull()) {
         Handle(HeaderSection_FileDescription) fileDescription =
-            Handle(HeaderSection_FileDescription)::DownCast(stepModel->HeaderEntity(
-                STANDARD_TYPE(HeaderSection_FileDescription)));
+            Handle(HeaderSection_FileDescription)::DownCast(
+                stepModel->HeaderEntity(
+                    STANDARD_TYPE(HeaderSection_FileDescription)));
         if (!fileDescription.IsNull()) {
           Handle(Interface_HArray1OfHAsciiString) descriptions =
               fileDescription->Description();
@@ -1603,9 +1608,10 @@ int main(int argc, char *argv[]) {
                                  newModel.forwardNavigationData);
 
       if (!reader.Transfer(newModel.document)) {
-        std::cerr << "Error: Failsafe triggered. Could not transfer STEP data to "
-                     "the XCAF document framework: "
-                  << stepFilePath << std::endl;
+        std::cerr
+            << "Error: Failsafe triggered. Could not transfer STEP data to "
+               "the XCAF document framework: "
+            << stepFilePath << std::endl;
         app->Close(newModel.document);
         for (LoadedStepModel &loadedModel : newModels) {
           app->Close(loadedModel.document);
@@ -1662,8 +1668,9 @@ int main(int argc, char *argv[]) {
           Handle(AIS_TexturedShape) checkerboard =
               MakeCheckerboardPresentation(face, tree);
           if (checkerboard.IsNull()) {
-            std::cerr << "Warning: could not render marked checkerboard face in "
-                      << stepFilePath << std::endl;
+            std::cerr
+                << "Warning: could not render marked checkerboard face in "
+                << stepFilePath << std::endl;
             continue;
           }
           newModel.checkerboardPresentations.push_back(checkerboard);
@@ -1678,7 +1685,7 @@ int main(int argc, char *argv[]) {
       for (const LoadedStepModel &oldModel : models) {
         if (newModel.path == oldModel.path) {
           newModel.visible = oldModel.visible;
-          break;
+          newModel.transparency = oldModel.transparency;
         }
       }
     }
@@ -1690,7 +1697,7 @@ int main(int argc, char *argv[]) {
       if (!oldModel.forwardNavHighlight.IsNull()) {
         context->Remove(oldModel.forwardNavHighlight, Standard_False);
       }
-      for (const Handle(AIS_TexturedShape) &checkerboard :
+      for (const Handle(AIS_TexturedShape) & checkerboard :
            oldModel.checkerboardPresentations) {
         context->Remove(checkerboard, Standard_False);
       }
@@ -1702,8 +1709,9 @@ int main(int argc, char *argv[]) {
     }
     for (LoadedStepModel &loadedModel : models) {
       if (loadedModel.visible) {
-        context->Display(loadedModel.presentation, AIS_Shaded, 0, Standard_False);
-        for (const Handle(AIS_TexturedShape) &checkerboard :
+        context->Display(loadedModel.presentation, AIS_Shaded, 0,
+                         Standard_False);
+        for (const Handle(AIS_TexturedShape) & checkerboard :
              loadedModel.checkerboardPresentations) {
           context->Display(checkerboard, 3, 0, Standard_False);
           context->Deactivate(checkerboard);
@@ -1713,8 +1721,8 @@ int main(int argc, char *argv[]) {
                                       Standard_False);
       context->SetSelectionModeActive(loadedModel.presentation, 4,
                                       Standard_True);
-      context->SetTransparency(loadedModel.presentation, kModelTransparency,
-                               Standard_False);
+      context->SetTransparency(loadedModel.presentation,
+                               loadedModel.transparency, Standard_False);
       if (kApplyTintColor) {
         context->SetColor(loadedModel.presentation, kTintColor, Standard_False);
       }
@@ -1764,7 +1772,12 @@ int main(int argc, char *argv[]) {
   const Quantity_Color hiddenModelColor(0.42, 0.42, 0.42, Quantity_TOC_RGB);
   std::vector<Handle(AIS_TextLabel)> modelListLabels;
   modelListLabels.reserve(models.size());
+  double modelListPanelWidth = 0.0;
   for (std::size_t i = 0; i < models.size(); ++i) {
+    const std::string basename = models[i].path.filename().string();
+    modelListPanelWidth =
+        std::max(modelListPanelWidth,
+                 18.0 + static_cast<double>(basename.size() + 2) * 10.0);
     Handle(AIS_TextLabel) label = new AIS_TextLabel();
     label->SetPosition(gp_Pnt(0.0, 0.0, 0.0));
     label->SetOwnAnchorPoint(Standard_True);
@@ -1777,6 +1790,7 @@ int main(int argc, char *argv[]) {
         Graphic3d_Vec2i(14, 14 + static_cast<Standard_Integer>(i) * 22)));
     modelListLabels.push_back(label);
     context->Display(label, Standard_False);
+    context->Deactivate(label);
   }
   auto refreshModelListLabels = [&]() {
     for (std::size_t i = 0; i < modelListLabels.size(); ++i) {
@@ -1797,22 +1811,76 @@ int main(int argc, char *argv[]) {
     }
   };
   refreshModelListLabels();
-
+  auto toggleModelVisibility = [&](LoadedStepModel &model) {
+    model.visible = !model.visible;
+    if (model.visible) {
+      context->Display(model.presentation, AIS_Shaded, 0, Standard_False);
+      context->SetSelectionModeActive(model.presentation, 0, Standard_False);
+      context->SetSelectionModeActive(model.presentation, 1, wasShiftPressed);
+      context->SetSelectionModeActive(model.presentation, 4, !wasShiftPressed);
+      for (const Handle(AIS_TexturedShape) & checkerboard :
+           model.checkerboardPresentations) {
+        context->Display(checkerboard, 3, 0, Standard_False);
+        context->Deactivate(checkerboard);
+      }
+      if (!model.forwardNavHighlight.IsNull()) {
+        context->Display(model.forwardNavHighlight, Standard_False);
+      }
+    } else {
+      context->Erase(model.presentation, Standard_False);
+      if (!model.forwardNavHighlight.IsNull()) {
+        context->Erase(model.forwardNavHighlight, Standard_False);
+      }
+      for (const Handle(AIS_TexturedShape) & checkerboard :
+           model.checkerboardPresentations) {
+        context->Erase(checkerboard, Standard_False);
+      }
+    }
+    refreshModelListLabels();
+    context->UpdateCurrentViewer();
+    dirty = true;
+  };
+  auto setModelTransparency = [&](LoadedStepModel &model,
+                                  const double transparency) {
+    model.transparency = std::clamp(transparency, 0.0, 1.0);
+    context->SetTransparency(model.presentation, model.transparency,
+                             Standard_False);
+    context->UpdateCurrentViewer();
+    dirty = true;
+  };
+  auto modelListRowAt = [&](const double mouseX, const double mouseY,
+                            const int windowWidth) {
+    for (std::size_t i = 0; i < models.size(); ++i) {
+      const std::string basename = models[i].path.filename().string();
+      const double rowWidth =
+          std::min(static_cast<double>(windowWidth),
+                   18.0 + static_cast<double>(basename.size() + 2) * 10.0);
+      const double rowTop = static_cast<double>(i) * 22.0;
+      if (mouseX >= static_cast<double>(windowWidth) - rowWidth &&
+          mouseY >= rowTop - 4.0 && mouseY < rowTop + 18.0) {
+        return i;
+      }
+    }
+    return models.size();
+  };
 
   const std::vector<const char *> helpKeys = {
-      "Left click", "Shift+LMB", "Middle drag", "Right drag", "Up/Down",
-      "Space",      "T",         "C",           "H",          "Esc"};
+      "Left click", "Shift+LMB", "Middle drag", "Right drag",
+      "Up/Down",    "Space",     "T",           "C",
+      "H",          "Esc",       "Shift+wheel", ".step drag"};
   const std::vector<const char *> helpDescriptions = {
-      "select file / jump to source",
+      "toggle basename / jump to source",
       "vertex query; face color fallback",
       "pan",
       "rotate",
-      "select file (wrap)",
+      "select file (wrap); hover model",
       "toggle selected file visibility",
       "toggle file list",
       "print camera state",
       "cycle help modes",
-      "quit"};
+      "quit",
+      "transparency",
+      "transparency"};
   std::vector<Handle(AIS_TextLabel)> helpLabels1;
   std::vector<Handle(AIS_TextLabel)> helpLabels2;
   for (std::size_t i = 0; i < helpKeys.size(); ++i) {
@@ -1884,6 +1952,15 @@ int main(int argc, char *argv[]) {
   bool wasDownPressed = false;
   bool wasListTogglePressed = false;
   bool wasHelpTogglePressed = false;
+  bool hasPreviousMousePosition = false;
+  double previousMouseX = 0.0;
+  double previousMouseY = 0.0;
+  bool listRowInteractionActive = false;
+  bool listRowInteractionDragged = false;
+  std::size_t listRowInteractionIndex = 0;
+  std::filesystem::path listRowInteractionPath;
+  double listRowInteractionStartX = 0.0;
+  double listRowInteractionStartTransparency = 0.0;
 
   double rotateStartX = 0.0;
   double rotateStartY = 0.0;
@@ -1895,10 +1972,13 @@ int main(int argc, char *argv[]) {
   glfwGetFramebufferSize(occtWindow->getGlfwWindow(), &lastFbWidth,
                          &lastFbHeight);
 
-  auto findModelByPath = [&](const std::string &modelPath) -> LoadedStepModel * {
+  auto findModelByPath =
+      [&](const std::string &modelPath) -> LoadedStepModel * {
     std::error_code pathError;
-    const std::string absoluteModelPath = NormalizePath(
-        std::filesystem::absolute(modelPath, pathError).lexically_normal().string());
+    const std::string absoluteModelPath =
+        NormalizePath(std::filesystem::absolute(modelPath, pathError)
+                          .lexically_normal()
+                          .string());
     if (pathError) {
       return nullptr;
     }
@@ -1922,7 +2002,8 @@ int main(int argc, char *argv[]) {
   auto getRootShape = [&](const LoadedStepModel &loadedModel,
                           TopoDS_Shape &rootShapeOut) {
     return !loadedModel.shapeTool.IsNull() &&
-           loadedModel.shapeTool->GetShape(loadedModel.rootLabel, rootShapeOut) &&
+           loadedModel.shapeTool->GetShape(loadedModel.rootLabel,
+                                           rootShapeOut) &&
            !rootShapeOut.IsNull();
   };
 
@@ -1934,31 +2015,30 @@ int main(int argc, char *argv[]) {
            std::to_string(vertexIndex);
   };
 
-  auto printVertexReplay = [&](const LoadedStepModel &loadedModel,
-                               const TopoDS_Shape &rootShape,
-                               const Standard_Integer vertexIndex,
-                               const gp_Pnt &stabPoint, const bool hasStab,
-                               const bool includeEntry) {
-    TopoDS_Vertex vertex;
-    if (!FindVertexByIndex(rootShape, vertexIndex, vertex)) {
-      return false;
-    }
-    const gp_Pnt vertexPoint = BRep_Tool::Pnt(vertex);
-    if (includeEntry) {
-      const std::string modelEntry =
-          loadedModel.path.filename().string() + ":" +
-          vertexEntry(loadedModel, vertexIndex);
-      std::cout << modelEntry << ' ';
-    }
-    std::cout << "snap:" << vertexPoint.X() << ',' << vertexPoint.Y() << ','
-              << vertexPoint.Z();
-    if (hasStab) {
-      std::cout << " stab:" << std::setprecision(17) << stabPoint.X() << ','
-                << stabPoint.Y() << ',' << stabPoint.Z();
-    }
-    std::cout << std::endl;
-    return true;
-  };
+  auto printVertexReplay =
+      [&](const LoadedStepModel &loadedModel, const TopoDS_Shape &rootShape,
+          const Standard_Integer vertexIndex, const gp_Pnt &stabPoint,
+          const bool hasStab, const bool includeEntry) {
+        TopoDS_Vertex vertex;
+        if (!FindVertexByIndex(rootShape, vertexIndex, vertex)) {
+          return false;
+        }
+        const gp_Pnt vertexPoint = BRep_Tool::Pnt(vertex);
+        if (includeEntry) {
+          const std::string modelEntry = loadedModel.path.filename().string() +
+                                         ":" +
+                                         vertexEntry(loadedModel, vertexIndex);
+          std::cout << modelEntry << ' ';
+        }
+        std::cout << "snap:" << vertexPoint.X() << ',' << vertexPoint.Y() << ','
+                  << vertexPoint.Z();
+        if (hasStab) {
+          std::cout << " stab:" << std::setprecision(17) << stabPoint.X() << ','
+                    << stabPoint.Y() << ',' << stabPoint.Z();
+        }
+        std::cout << std::endl;
+        return true;
+      };
 
   auto applyVertexReplayQuery = [&](const std::string &rawQueryLine) {
     VertexReplayQuery query;
@@ -2014,8 +2094,8 @@ int main(int argc, char *argv[]) {
     }
 
     gp_Pnt stabPoint;
-    const bool hasRayHit = FindMouseRayHit(view, query.mouseX, query.mouseY,
-                                           rootShape, stabPoint);
+    const bool hasRayHit =
+        FindMouseRayHit(view, query.mouseX, query.mouseY, rootShape, stabPoint);
     setSelectionModes(wasShiftPressed, !wasShiftPressed);
     if (!hasRayHit) {
       std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
@@ -2052,8 +2132,8 @@ int main(int argc, char *argv[]) {
     for (LoadedStepModel &loadedModel : models) {
       std::string modelResolvedSource;
       std::vector<std::string> modelResolvedEntries;
-      if (ResolveForwardNavigationQuery(loadedModel.forwardNavigationData, query,
-                                        modelResolvedSource,
+      if (ResolveForwardNavigationQuery(loadedModel.forwardNavigationData,
+                                        query, modelResolvedSource,
                                         modelResolvedEntries)) {
         found = true;
         if (resolvedSource.empty()) {
@@ -2132,56 +2212,7 @@ int main(int argc, char *argv[]) {
     const bool isSpacePressed =
         glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_SPACE) == GLFW_PRESS;
     if (isSpacePressed && !wasSpacePressed && models.size() > 1) {
-      LoadedStepModel &selectedModel = models[selectedModelIndex];
-      selectedModel.visible = !selectedModel.visible;
-      if (selectedModel.visible) {
-        context->Display(selectedModel.presentation, AIS_Shaded, 0,
-                         Standard_False);
-        context->SetSelectionModeActive(selectedModel.presentation, 0,
-                                        Standard_False);
-        context->SetSelectionModeActive(selectedModel.presentation, 1,
-                                        wasShiftPressed);
-        context->SetSelectionModeActive(selectedModel.presentation, 4,
-                                        !wasShiftPressed);
-        for (const Handle(AIS_TexturedShape) &checkerboard :
-             selectedModel.checkerboardPresentations) {
-          context->Display(checkerboard, 3, 0, Standard_False);
-          context->Deactivate(checkerboard);
-        }
-        if (!selectedModel.forwardNavHighlight.IsNull()) {
-          context->Display(selectedModel.forwardNavHighlight, Standard_False);
-        }
-      } else {
-        context->Erase(selectedModel.presentation, Standard_False);
-        if (!selectedModel.forwardNavHighlight.IsNull()) {
-          context->Erase(selectedModel.forwardNavHighlight, Standard_False);
-        }
-        for (const Handle(AIS_TexturedShape) &checkerboard :
-             selectedModel.checkerboardPresentations) {
-          context->Erase(checkerboard, Standard_False);
-        }
-      }
-      refreshModelListLabels();
-      context->UpdateCurrentViewer();
-      dirty = true;
-    }
-
-    const bool isUpPressed =
-        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_UP) == GLFW_PRESS;
-    const bool isDownPressed =
-        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_DOWN) == GLFW_PRESS;
-    if (models.size() > 1 &&
-        ((isUpPressed && !wasUpPressed) ||
-         (isDownPressed && !wasDownPressed))) {
-      if (isUpPressed && !wasUpPressed) {
-        selectedModelIndex =
-            (selectedModelIndex + models.size() - 1) % models.size();
-      } else {
-        selectedModelIndex = (selectedModelIndex + 1) % models.size();
-      }
-      refreshModelListLabels();
-      context->UpdateCurrentViewer();
-      dirty = true;
+      toggleModelVisibility(models[selectedModelIndex]);
     }
 
     const bool isListTogglePressed =
@@ -2194,8 +2225,6 @@ int main(int argc, char *argv[]) {
     }
 
     wasCameraPressed = isCameraPressed;
-    wasUpPressed = isUpPressed;
-    wasDownPressed = isDownPressed;
     wasListTogglePressed = isListTogglePressed;
 
     const bool isHelpTogglePressed =
@@ -2274,19 +2303,26 @@ int main(int argc, char *argv[]) {
 
     double mouseX = 0.0, mouseY = 0.0;
     glfwGetCursorPos(occtWindow->getGlfwWindow(), &mouseX, &mouseY);
-
-    if (scrollContext.deltaY != 0.0) {
-      const Standard_Real zoomFactor =
-          (Standard_Real)std::pow(1.12, scrollContext.deltaY);
-      view->SetZoom(zoomFactor, Standard_True);
-      scrollContext.deltaY = 0.0;
-      dirty = true;
-    }
+    int windowWidth = 0;
+    glfwGetWindowSize(occtWindow->getGlfwWindow(), &windowWidth, nullptr);
 
     const bool isShiftPressed = glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                                 glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    if (scrollContext.deltaY != 0.0) {
+      if (isShiftPressed && !models.empty()) {
+        setModelTransparency(models[selectedModelIndex],
+                             models[selectedModelIndex].transparency +
+                                 scrollContext.deltaY * 0.05);
+      } else {
+        const Standard_Real zoomFactor =
+            (Standard_Real)std::pow(1.12, scrollContext.deltaY);
+        view->SetZoom(zoomFactor, Standard_True);
+        dirty = true;
+      }
+      scrollContext.deltaY = 0.0;
+    }
     if (isShiftPressed != wasShiftPressed) {
       setSelectionModes(isShiftPressed, !isShiftPressed);
       context->UpdateCurrentViewer();
@@ -2298,6 +2334,53 @@ int main(int argc, char *argv[]) {
 
     context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
                     Standard_True);
+    const bool isUpPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_UP) == GLFW_PRESS;
+    const bool isDownPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_DOWN) == GLFW_PRESS;
+    const bool pointerOverModelList =
+        modelListVisible && models.size() > 1 &&
+        mouseX >= static_cast<double>(windowWidth) -
+                      std::min(static_cast<double>(windowWidth),
+                               modelListPanelWidth) &&
+        mouseY >= 10.0 &&
+        mouseY < 32.0 + static_cast<double>(models.size() - 1) * 22.0;
+    if (!hasPreviousMousePosition || mouseX != previousMouseX ||
+        mouseY != previousMouseY) {
+      hasPreviousMousePosition = true;
+      previousMouseX = mouseX;
+      previousMouseY = mouseY;
+      if (!pointerOverModelList && context->HasDetected()) {
+        const Handle(SelectMgr_EntityOwner) detectedOwner =
+            context->DetectedOwner();
+        for (std::size_t i = 0; i < models.size(); ++i) {
+          if (detectedOwner->IsSameSelectable(models[i].presentation)) {
+            if (selectedModelIndex != i) {
+              selectedModelIndex = i;
+              refreshModelListLabels();
+              context->UpdateCurrentViewer();
+              dirty = true;
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    if (models.size() > 1 && ((isUpPressed && !wasUpPressed) ||
+                              (isDownPressed && !wasDownPressed))) {
+      if (isUpPressed && !wasUpPressed) {
+        selectedModelIndex =
+            (selectedModelIndex + models.size() - 1) % models.size();
+      } else {
+        selectedModelIndex = (selectedModelIndex + 1) % models.size();
+      }
+      refreshModelListLabels();
+      context->UpdateCurrentViewer();
+      dirty = true;
+    }
+    wasUpPressed = isUpPressed;
+    wasDownPressed = isDownPressed;
 
     const bool isLeftPressed =
         glfwGetMouseButton(occtWindow->getGlfwWindow(),
@@ -2312,26 +2395,38 @@ int main(int argc, char *argv[]) {
     if (isLeftPressed && !wasLeftPressed && !isShiftPressed &&
         models.size() > 1 && modelListVisible && !isRightPressed &&
         !isMiddlePressed) {
-      int windowWidth = 0;
-      int windowHeight = 0;
-      glfwGetWindowSize(occtWindow->getGlfwWindow(), &windowWidth,
-                        &windowHeight);
-      (void)windowHeight;
-      for (std::size_t i = 0; i < models.size(); ++i) {
-        const std::string basename = models[i].path.filename().string();
-        const double rowWidth = std::min(
-            static_cast<double>(windowWidth),
-            18.0 + static_cast<double>(basename.size() + 2) * 10.0);
-        const double rowTop = 14.0 + static_cast<double>(i) * 22.0;
-        if (mouseX >= static_cast<double>(windowWidth) - rowWidth &&
-            mouseY >= rowTop - 4.0 && mouseY < rowTop + 18.0) {
-          selectedModelIndex = i;
-          selectedListRowClick = true;
-          refreshModelListLabels();
-          context->UpdateCurrentViewer();
-          dirty = true;
-          break;
+      const std::size_t row = modelListRowAt(mouseX, mouseY, windowWidth);
+      if (row < models.size()) {
+        listRowInteractionActive = true;
+        listRowInteractionDragged = false;
+        listRowInteractionIndex = row;
+        listRowInteractionPath = models[row].path;
+        listRowInteractionStartX = mouseX;
+        listRowInteractionStartTransparency = models[row].transparency;
+      }
+    }
+    if (listRowInteractionActive) {
+      const bool rowStillExists =
+          listRowInteractionIndex < models.size() &&
+          models[listRowInteractionIndex].path == listRowInteractionPath;
+      if (!rowStillExists) {
+        listRowInteractionActive = false;
+      } else if (isLeftPressed) {
+        selectedListRowClick = true;
+        const double dragX = mouseX - listRowInteractionStartX;
+        if (std::abs(dragX) > 5.0) {
+          listRowInteractionDragged = true;
         }
+        if (listRowInteractionDragged) {
+          setModelTransparency(models[listRowInteractionIndex],
+                               listRowInteractionStartTransparency +
+                                   dragX * 0.01);
+        }
+      } else {
+        if (!listRowInteractionDragged) {
+          toggleModelVisibility(models[listRowInteractionIndex]);
+        }
+        listRowInteractionActive = false;
       }
     }
 
@@ -2613,4 +2708,3 @@ int main(int argc, char *argv[]) {
   }
   return 0;
 }
-

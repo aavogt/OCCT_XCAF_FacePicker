@@ -46,11 +46,15 @@ for `model.step` and applying the query locally.
 
 ## camera replay
 
-Press C to print a camera state. With multiple STEP files loaded, the viewer
-lists their basenames on the right. Up/Down wraps the selection, left click
-selects a file, and Space toggles its visibility. Press T to show or hide the
-list. Press H to cycle the help overlay through key labels only, key labels
-with descriptions, and `h(elp)`. 
+With multiple STEP files loaded, their basenames appear on the right. The `>`
+follows the model under the pointer; Up/Down also cycles through files with
+wrapping. Clicking a basename toggles that file's visibility without moving
+the `>`; dragging horizontally from a basename by more than 5 pixels adjusts
+that file's transparency (right increases, left decreases) instead. Shift+wheel
+adjusts transparency for the focused file; wheel without Shift zooms. Space
+toggles visibility of the file marked by `>`. Press T to show or hide the list.
+Press C to print a camera state and H to cycle the help overlay through key
+labels only, key labels with descriptions, and `h(elp)`.
 
 ```text
 eye_x,eye_y,eye_z:target_x,target_y,target_z:up_x,up_y,up_z
