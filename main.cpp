@@ -1554,7 +1554,7 @@ int main(int argc, char *argv[]) {
     configurePbrMaterial(fillAspect);
   };
 
-  auto loadModelsFromDisk = [&]() -> bool {
+  auto loadModelsFromDisk = [&](const bool fitView) -> bool {
     std::vector<LoadedStepModel> newModels;
     for (const std::filesystem::path &stepPath : stepPaths) {
       LoadedStepModel newModel;
@@ -1732,7 +1732,9 @@ int main(int argc, char *argv[]) {
         app->Close(oldModel.document);
       }
     }
-    view->FitAll();
+    if (fitView) {
+      view->FitAll();
+    }
     view->ZFitAll();
     context->UpdateCurrentViewer();
     return true;
@@ -1743,7 +1745,7 @@ int main(int argc, char *argv[]) {
       context->SetSelectionModeActive(loadedModel.presentation, 4, faceMode);
     }
   };
-  if (!loadModelsFromDisk()) {
+  if (!loadModelsFromDisk(true)) {
     glfwTerminate();
     return 1;
   }
@@ -2270,7 +2272,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (reloadRequested.exchange(false, std::memory_order_acquire)) {
-      if (loadModelsFromDisk()) {
+      if (loadModelsFromDisk(false)) {
         refreshModelListLabels();
         std::cout << "STEP models reloaded from disk." << std::endl;
       } else {
