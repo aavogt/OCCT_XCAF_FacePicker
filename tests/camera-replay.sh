@@ -82,23 +82,44 @@ press_key() {
 
 read_camera() {
   local log_file=$1
+  local previous_state=${2:-}
   local line
-  local state=
+  local state
   for _ in {1..100}; do
+    state=
     while IFS= read -r line; do
       if [[ "$line" =~ ^[-+0-9.eE,]+:[-+0-9.eE,]+:[-+0-9.eE,]+$ ]]; then
         state=$line
       fi
     done < "$log_file"
-    if [[ -n "$state" ]]; then
+    if [[ -n "$state" && "$state" != "$previous_state" ]]; then
       printf '%s\n' "$state"
       return 0
     fi
     sleep 0.1
   done
   cat "$log_file" >&2
-  printf 'viewer did not print a camera state\n' >&2
+  printf 'viewer did not print a new camera state\n' >&2
   return 1
+}
+
+apply_camera_state_cli() {
+  local state=$1
+  local display_mode=$2
+  local log_file="$tmpdir/standalone-$display_mode.log"
+  if [[ "$display_mode" == valid ]]; then
+    (cd "$tmpdir" && timeout 10s env DISPLAY="$DISPLAY" \
+      "$binary" "$state") >"$log_file" 2>&1 || {
+      cat "$log_file" >&2
+      return 1
+    }
+  else
+    (cd "$tmpdir" && timeout 10s env -u DISPLAY \
+      "$binary" "$state") >"$log_file" 2>&1 || {
+      cat "$log_file" >&2
+      return 1
+    }
+  fi
 }
 
 stop_viewer() {
@@ -141,7 +162,7 @@ sleep 0.2
 xdotool mouseup 3
 sleep 0.2
 press_key c
-played_state=$(read_camera "$live_log")
+played_state=$(read_camera "$live_log" "$initial_state")
 if [[ "$initial_state" == "$played_state" ]]; then
   printf 'camera input did not change the camera state\n' >&2
   exit 1
@@ -157,5 +178,26 @@ if ! camera_state_close "$played_state" "$replayed_state"; then
     "$played_state" "$replayed_state" >&2
   exit 1
 fi
+
+apply_camera_state_cli "$initial_state" valid
+sleep 0.2
+press_key c
+standalone_initial=$(read_camera "$replay_log" "$replayed_state")
+if ! camera_state_close "$initial_state" "$standalone_initial"; then
+  printf 'standalone camera command with DISPLAY failed\n  expected: %s\n  actual: %s\n' \
+    "$initial_state" "$standalone_initial" >&2
+  exit 1
+fi
+
+apply_camera_state_cli "$played_state" unset
+sleep 0.2
+press_key c
+standalone_played=$(read_camera "$replay_log" "$standalone_initial")
+if ! camera_state_close "$played_state" "$standalone_played"; then
+  printf 'standalone camera command without DISPLAY failed\n  expected: %s\n  actual: %s\n' \
+    "$played_state" "$standalone_played" >&2
+  exit 1
+fi
+
 stop_viewer
-printf 'camera replay round-trip passed\n'
+printf 'camera replay and standalone state round-trip passed\n'

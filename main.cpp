@@ -1274,6 +1274,7 @@ int main(int argc, char *argv[]) {
                  "[camera_position:[camera_target:[camera_up]]]"
               << std::endl;
     std::cout << "       " << argv[0] << " <source:line:col>" << std::endl;
+    std::cout << "       " << argv[0] << " <camera_state>" << std::endl;
     std::cout << "       " << argv[0]
               << "                 (open and auto-reload all ./*.step files)"
               << std::endl;
@@ -1306,9 +1307,13 @@ int main(int argc, char *argv[]) {
 
   CameraState cameraState;
   bool hasCameraState = false;
+  bool cameraStateOnly = false;
   std::string cliForwardQuery;
   std::string cliModelPath;
-  if (argc == 4) {
+  if (argc == 2 && ParseCameraState(argv[1], cameraState)) {
+    hasCameraState = true;
+    cameraStateOnly = true;
+  } else if (argc == 4) {
     if (!ParseCameraState(argv[3], cameraState)) {
       std::cerr << "Error: invalid camera state; expected "
                    "x,y,z:x,y,z:x,y,z"
@@ -1352,7 +1357,27 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (!cliForwardQuery.empty()) {
+  if (cameraStateOnly) {
+#ifndef _WIN32
+    std::string sendError;
+    int sendErrno = 0;
+    if (SendForwardNavigationRequest(socketPath, argv[1], sendError,
+                                     &sendErrno)) {
+      return 0;
+    }
+
+    const bool socketUnavailable =
+        (sendErrno == ENOENT || sendErrno == ECONNREFUSED);
+    if (!socketUnavailable) {
+      std::cerr << "Error: could not send camera-state request to "
+                << socketPath << ": " << sendError << std::endl;
+      return 1;
+    }
+    std::cerr << "Camera-state socket unavailable; opening viewer for STEP "
+                 "files in the current directory."
+              << std::endl;
+#endif
+  } else if (!cliForwardQuery.empty()) {
 #ifdef _WIN32
     std::cerr << "Error: forward navigation IPC is not supported on Windows."
               << std::endl;
@@ -1382,7 +1407,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::vector<std::filesystem::path> stepPaths;
-  if (argc == 1) {
+  if (argc == 1 || cameraStateOnly) {
     if (!CollectMatchingStepFiles(stepPaths)) {
       return 1;
     }
@@ -2177,6 +2202,11 @@ int main(int argc, char *argv[]) {
     std::cout << std::endl;
   };
   auto applyQuery = [&](const std::string &rawQueryLine) {
+    CameraState cameraQuery;
+    if (ParseCameraState(rawQueryLine, cameraQuery)) {
+      ApplyCameraState(view, cameraQuery);
+      return;
+    }
     MouseReplayQuery mouseQuery;
     if (ParseMouseReplayQuery(rawQueryLine, mouseQuery)) {
       (void)applyMouseReplayQuery(rawQueryLine);
