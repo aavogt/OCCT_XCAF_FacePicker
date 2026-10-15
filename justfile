@@ -2,6 +2,9 @@ build:
   cmake -Bbuild
   cmake --build build
 
+test-camera-replay: build
+  bash tests/camera-replay.sh
+
 clean:
   rm -rf build
 
