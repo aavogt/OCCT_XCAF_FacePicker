@@ -2498,7 +2498,8 @@ int main(int argc, char *argv[]) {
 
       const int selectionPassCount = isShiftPressed ? 2 : 1;
       bool handledVertex = false;
-      for (int selectionPass = 0; selectionPass < selectionPassCount;
+      for (int selectionPass = 0;
+           selectionPass < selectionPassCount && !handledVertex;
            ++selectionPass) {
         const bool vertexPass = isShiftPressed && selectionPass == 0;
         if (selectionPass > 0) {
@@ -2569,12 +2570,10 @@ int main(int argc, char *argv[]) {
                 std::string(rootEntry.ToCString()) + ":v" +
                 std::to_string(vertexIndex);
             const gp_Pnt vertexPoint = BRep_Tool::Pnt(pickedVertex);
-            gp_Pnt stabPoint;
-            if (!FindMouseRayHit(view, (Standard_Integer)mouseX,
-                                 (Standard_Integer)mouseY, rootShape,
-                                 stabPoint)) {
-              continue;
-            }
+            gp_Pnt stabPoint = vertexPoint;
+            (void)FindMouseRayHit(view, (Standard_Integer)mouseX,
+                                  (Standard_Integer)mouseY, rootShape,
+                                  stabPoint);
             Standard_Real screenX = 0.0;
             Standard_Real screenY = 0.0;
             view->Project(vertexPoint.X(), vertexPoint.Y(), vertexPoint.Z(),
