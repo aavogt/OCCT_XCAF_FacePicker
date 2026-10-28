@@ -107,7 +107,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
-#include <TopoDS_Compound.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -1284,7 +1284,7 @@ int main(int argc, char *argv[]) {
                  "\tShift+wheel adjusts focused-file transparency; wheel "
                  "zooms\n"
                  "\tLeft click a model to jump to source; Shift-left for "
-                 "vertex query\n"
+                 "vertex query; Ctrl-left for edge vertices and length\n"
                  "\tMiddle click to pan\n\tRight click to rotate\n"
                  "\tUp/Down to select a file (wrap); Space toggles visibility\n"
                  "\tT to toggle file list\n\tC to print camera state\n"
@@ -1538,6 +1538,7 @@ int main(int argc, char *argv[]) {
   std::size_t selectedModelIndex = 0;
   bool modelListVisible = true;
   bool wasShiftPressed = false;
+  bool wasControlPressed = false;
 
 #ifndef _WIN32
   int forwardNavSocketFd = -1;
@@ -1744,8 +1745,12 @@ int main(int argc, char *argv[]) {
       }
       context->SetSelectionModeActive(loadedModel.presentation, 0,
                                       Standard_False);
+      context->SetSelectionModeActive(loadedModel.presentation, 1,
+                                      wasShiftPressed && !wasControlPressed);
+      context->SetSelectionModeActive(loadedModel.presentation, 2,
+                                      wasControlPressed);
       context->SetSelectionModeActive(loadedModel.presentation, 4,
-                                      Standard_True);
+                                      !wasShiftPressed && !wasControlPressed);
       context->SetTransparency(loadedModel.presentation,
                                loadedModel.transparency, Standard_False);
       if (kApplyTintColor) {
@@ -1764,9 +1769,11 @@ int main(int argc, char *argv[]) {
     context->UpdateCurrentViewer();
     return true;
   };
-  auto setSelectionModes = [&](const bool vertexMode, const bool faceMode) {
+  auto setSelectionModes = [&](const bool vertexMode, const bool edgeMode,
+                               const bool faceMode) {
     for (LoadedStepModel &loadedModel : models) {
       context->SetSelectionModeActive(loadedModel.presentation, 1, vertexMode);
+      context->SetSelectionModeActive(loadedModel.presentation, 2, edgeMode);
       context->SetSelectionModeActive(loadedModel.presentation, 4, faceMode);
     }
   };
@@ -1843,8 +1850,12 @@ int main(int argc, char *argv[]) {
     if (model.visible) {
       context->Display(model.presentation, AIS_Shaded, 0, Standard_False);
       context->SetSelectionModeActive(model.presentation, 0, Standard_False);
-      context->SetSelectionModeActive(model.presentation, 1, wasShiftPressed);
-      context->SetSelectionModeActive(model.presentation, 4, !wasShiftPressed);
+      context->SetSelectionModeActive(model.presentation, 1,
+                                      wasShiftPressed && !wasControlPressed);
+      context->SetSelectionModeActive(model.presentation, 2,
+                                      wasControlPressed);
+      context->SetSelectionModeActive(model.presentation, 4,
+                                      !wasShiftPressed && !wasControlPressed);
       for (const Handle(AIS_TexturedShape) & checkerboard :
            model.checkerboardPresentations) {
         context->Display(checkerboard, 3, 0, Standard_False);
@@ -1892,12 +1903,13 @@ int main(int argc, char *argv[]) {
   };
 
   const std::vector<const char *> helpKeys = {
-      "Left click", "Shift+LMB", "Middle drag", "Right drag",
-      "Up/Down",    "Space",     "T",           "C",
-      "H",          "Esc",       "Shift+wheel", ".step drag"};
+      "Left click", "Shift+LMB", "Ctrl+LMB", "Middle drag", "Right drag",
+      "Up/Down",    "Space",     "T",        "C",           "H",
+      "Esc",        "Shift+wheel", ".step drag"};
   const std::vector<const char *> helpDescriptions = {
       "toggle basename / jump to source",
       "vertex query; face color fallback",
+      "edge vertices, index and length",
       "pan",
       "rotate",
       "select file (wrap); hover model",
@@ -1916,6 +1928,7 @@ int main(int argc, char *argv[]) {
     helpLabels2.push_back(createHelpLabel(helpDescriptions[i], 100, y));
   }
   const Handle(AIS_TextLabel) modifierHelpLabel = helpLabels1[1];
+  const Handle(AIS_TextLabel) controlHelpLabel = helpLabels1[2];
   const Handle(AIS_TextLabel) collapsedHelpLabel =
       createHelpLabel("h(elp)", 14, 14);
   context->Erase(collapsedHelpLabel, Standard_False);
@@ -2097,10 +2110,12 @@ int main(int argc, char *argv[]) {
 
     ApplyCameraState(view, query.camera);
     for (LoadedStepModel &candidate : models) {
-      context->SetSelectionModeActive(candidate.presentation, 4,
-                                      Standard_False);
       context->SetSelectionModeActive(candidate.presentation, 1,
                                       &candidate == loadedModel);
+      context->SetSelectionModeActive(candidate.presentation, 2,
+                                      Standard_False);
+      context->SetSelectionModeActive(candidate.presentation, 4,
+                                      Standard_False);
     }
     context->UpdateCurrentViewer();
     context->MoveTo(query.mouseX, query.mouseY, view, Standard_True);
@@ -2123,7 +2138,9 @@ int main(int argc, char *argv[]) {
     gp_Pnt stabPoint;
     const bool hasRayHit =
         FindMouseRayHit(view, query.mouseX, query.mouseY, rootShape, stabPoint);
-    setSelectionModes(wasShiftPressed, !wasShiftPressed);
+    setSelectionModes(wasShiftPressed && !wasControlPressed,
+                      wasControlPressed,
+                      !wasShiftPressed && !wasControlPressed);
     if (!hasRayHit) {
       std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
                 << "')" << std::endl;
@@ -2342,6 +2359,11 @@ int main(int argc, char *argv[]) {
                                            GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                                 glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    const bool isControlPressed =
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_LEFT_CONTROL) ==
+            GLFW_PRESS ||
+        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_RIGHT_CONTROL) ==
+            GLFW_PRESS;
     if (scrollContext.deltaY != 0.0) {
       if (isShiftPressed && !models.empty()) {
         setModelTransparency(models[selectedModelIndex],
@@ -2355,12 +2377,18 @@ int main(int argc, char *argv[]) {
       }
       scrollContext.deltaY = 0.0;
     }
-    if (isShiftPressed != wasShiftPressed) {
-      setSelectionModes(isShiftPressed, !isShiftPressed);
+    if (isShiftPressed != wasShiftPressed ||
+        isControlPressed != wasControlPressed) {
+      setSelectionModes(isShiftPressed && !isControlPressed,
+                        isControlPressed,
+                        !isShiftPressed && !isControlPressed);
       context->UpdateCurrentViewer();
       modifierHelpLabel->SetColor(isShiftPressed ? activeHelpTextColor
                                                  : helpTextColor);
+      controlHelpLabel->SetColor(isControlPressed ? activeHelpTextColor
+                                                  : helpTextColor);
       context->Redisplay(modifierHelpLabel, Standard_False);
+      context->Redisplay(controlHelpLabel, Standard_False);
       dirty = true;
     }
 
@@ -2491,19 +2519,22 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
-    // Modifier-left-click prefers a vertex, then falls back to face color.
+    // Shift selects vertices; Ctrl selects edges and reports their vertices.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
         !isMiddlePressed && !selectedListRowClick) {
       context->SelectDetected();
 
-      const int selectionPassCount = isShiftPressed ? 2 : 1;
+      const int selectionPassCount =
+          isControlPressed ? 1 : (isShiftPressed ? 2 : 1);
       bool handledVertex = false;
       for (int selectionPass = 0;
            selectionPass < selectionPassCount && !handledVertex;
            ++selectionPass) {
-        const bool vertexPass = isShiftPressed && selectionPass == 0;
+        const bool edgePass = isControlPressed;
+        const bool vertexPass =
+            !edgePass && isShiftPressed && selectionPass == 0;
         if (selectionPass > 0) {
-          setSelectionModes(false, true);
+          setSelectionModes(false, false, true);
           context->UpdateCurrentViewer();
           context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
                           view, Standard_True);
@@ -2536,19 +2567,14 @@ int main(int argc, char *argv[]) {
 
           TopoDS_Shape pickedShape = brepOwner->Shape();
           const bool isVertex = pickedShape.ShapeType() == TopAbs_VERTEX;
-          if ((vertexPass && !isVertex) || (!vertexPass && isVertex)) {
+          const bool isEdge = pickedShape.ShapeType() == TopAbs_EDGE;
+          if ((vertexPass && !isVertex) || (edgePass && !isEdge) ||
+              (!vertexPass && !edgePass && (isVertex || isEdge))) {
             continue;
           }
 
-          if (vertexPass) {
-
-            const TopoDS_Vertex pickedVertex = TopoDS::Vertex(pickedShape);
-            TopoDS_Shape rootShape;
-            if (!shapeTool->GetShape(rootLabel, rootShape) ||
-                rootShape.IsNull()) {
-              continue;
-            }
-
+          auto printVertexQuery = [&](const TopoDS_Vertex &pickedVertex,
+                                      const TopoDS_Shape &rootShape) {
             TopTools_IndexedMapOfShape vertexMap;
             TopExp::MapShapes(rootShape, TopAbs_VERTEX, vertexMap);
             Standard_Integer vertexIndex = vertexMap.FindIndex(pickedVertex);
@@ -2561,7 +2587,7 @@ int main(int argc, char *argv[]) {
               }
             }
             if (vertexIndex == 0) {
-              continue;
+              return false;
             }
 
             TCollection_AsciiString rootEntry;
@@ -2627,6 +2653,54 @@ int main(int argc, char *argv[]) {
                 std::printf("|]");
             }
             std::cout << std::endl;
+            return true;
+          };
+
+          if (vertexPass || edgePass) {
+            TopoDS_Shape rootShape;
+            if (!shapeTool->GetShape(rootLabel, rootShape) ||
+                rootShape.IsNull()) {
+              continue;
+            }
+
+            if (vertexPass) {
+              if (printVertexQuery(TopoDS::Vertex(pickedShape), rootShape)) {
+                handledVertex = true;
+                break;
+              }
+              continue;
+            }
+
+            const TopoDS_Edge pickedEdge = TopoDS::Edge(pickedShape);
+            TopTools_IndexedMapOfShape edgeMap;
+            TopExp::MapShapes(rootShape, TopAbs_EDGE, edgeMap);
+            Standard_Integer edgeIndex = edgeMap.FindIndex(pickedEdge);
+            if (edgeIndex == 0) {
+              for (Standard_Integer i = 1; i <= edgeMap.Extent(); ++i) {
+                if (edgeMap(i).IsSame(pickedEdge)) {
+                  edgeIndex = i;
+                  break;
+                }
+              }
+            }
+
+            TopTools_IndexedMapOfShape edgeVertices;
+            for (TopExp_Explorer vertexIt(pickedEdge, TopAbs_VERTEX);
+                 vertexIt.More(); vertexIt.Next()) {
+              const TopoDS_Vertex edgeVertex =
+                  TopoDS::Vertex(vertexIt.Current());
+              if (!edgeVertices.Contains(edgeVertex)) {
+                edgeVertices.Add(edgeVertex);
+                (void)printVertexQuery(edgeVertex, rootShape);
+              }
+            }
+
+            GProp_GProps edgeProperties;
+            BRepGProp::LinearProperties(pickedEdge, edgeProperties);
+            std::cout << selectedModel->path.filename().string()
+                      << " edge:" << edgeIndex << " length:"
+                      << std::setprecision(17) << edgeProperties.Mass()
+                      << std::endl;
             handledVertex = true;
             break;
           }
@@ -2698,8 +2772,10 @@ int main(int argc, char *argv[]) {
           break;
         }
       }
-      if (isShiftPressed) {
-        setSelectionModes(true, false);
+      if (isShiftPressed || isControlPressed) {
+        setSelectionModes(isShiftPressed && !isControlPressed,
+                          isControlPressed,
+                          !isShiftPressed && !isControlPressed);
         context->UpdateCurrentViewer();
         context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
                         view, Standard_True);
@@ -2712,6 +2788,7 @@ int main(int argc, char *argv[]) {
     wasMiddlePressed = isMiddlePressed;
     wasSpacePressed = isSpacePressed;
     wasShiftPressed = isShiftPressed;
+    wasControlPressed = isControlPressed;
 
     if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();
