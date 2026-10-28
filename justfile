@@ -5,6 +5,9 @@ build:
 test-camera-replay: build
   bash tests/camera-replay.sh
 
+test-selection-no-color: build
+  xvfb-run -a bash tests/selection-no-color.sh
+
 clean:
   rm -rf build
 

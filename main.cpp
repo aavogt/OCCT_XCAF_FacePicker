@@ -95,11 +95,14 @@
 // Modeling & Structural Helpers
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_Surface.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Precision.hxx>
 #include <Quantity_Color.hxx>
 #include <TopExp.hxx>
@@ -199,7 +202,6 @@ struct LoadedStepModel {
   std::filesystem::path path;
   Handle(TDocStd_Document) document;
   Handle(XCAFDoc_ShapeTool) shapeTool;
-  Handle(XCAFDoc_ColorTool) colorTool;
   TDF_Label rootLabel;
   Handle(XCAFPrs_AISObject) presentation;
   std::unordered_map<std::string, std::string> labelSourceByEntry;
@@ -888,6 +890,39 @@ bool FindMouseRayHit(const Handle(V3d_View) & view,
   return found;
 }
 
+bool FindFaceNormalAtPoint(const TopoDS_Face &face, const gp_Pnt &pickedPoint,
+                           gp_Dir &normalOut) {
+  try {
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull()) {
+      return false;
+    }
+
+    GeomAPI_ProjectPointOnSurf projection(pickedPoint, surface,
+                                          Precision::Confusion());
+    if (projection.NbPoints() == 0) {
+      return false;
+    }
+
+    Standard_Real u = 0.0;
+    Standard_Real v = 0.0;
+    projection.LowerDistanceParameters(u, v);
+    const BRepAdaptor_Surface surfaceAdaptor(face);
+    BRepLProp_SLProps localProperties(surfaceAdaptor, u, v, 1,
+                                      Precision::Confusion());
+    if (!localProperties.IsNormalDefined()) {
+      return false;
+    }
+    normalOut = localProperties.Normal();
+    if (face.Orientation() == TopAbs_REVERSED) {
+      normalOut.Reverse();
+    }
+    return true;
+  } catch (const Standard_Failure &) {
+    return false;
+  }
+}
+
 bool FindVertexByIndex(const TopoDS_Shape &shape,
                        const Standard_Integer vertexIndex,
                        TopoDS_Vertex &vertexOut) {
@@ -1283,8 +1318,8 @@ int main(int argc, char *argv[]) {
                  "adjust transparency\n"
                  "\tShift+wheel adjusts focused-file transparency; wheel "
                  "zooms\n"
-                 "\tLeft click a model to jump to source; Shift-left for "
-                 "vertex query; Ctrl-left for edge vertices and length\n"
+                 "Left click a model to jump to source; Shift-left for "
+                 "vertex/edge query and face color/normal; Ctrl-left for edge queries\n"
                  "\tMiddle click to pan\n\tRight click to rotate\n"
                  "\tUp/Down to select a file (wrap); Space toggles visibility\n"
                  "\tT to toggle file list\n\tC to print camera state\n"
@@ -1647,8 +1682,6 @@ int main(int argc, char *argv[]) {
 
       newModel.shapeTool =
           XCAFDoc_DocumentTool::ShapeTool(newModel.document->Main());
-      newModel.colorTool =
-          XCAFDoc_DocumentTool::ColorTool(newModel.document->Main());
       Handle(XCAFDoc_LayerTool) layerTool =
           XCAFDoc_DocumentTool::LayerTool(newModel.document->Main());
       TDF_LabelSequence freeShapes;
@@ -1908,7 +1941,7 @@ int main(int argc, char *argv[]) {
       "Esc",        "Shift+wheel", ".step drag"};
   const std::vector<const char *> helpDescriptions = {
       "toggle basename / jump to source",
-      "vertex query; face color fallback",
+      "vertex query; edge query; face color/normal fallback",
       "edge vertices, index and length",
       "pan",
       "rotate",
@@ -2519,23 +2552,25 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
-    // Shift selects vertices; Ctrl selects edges and reports their vertices.
+    // Shift tries vertices, then edges, then face color; Ctrl selects edges.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
         !isMiddlePressed && !selectedListRowClick) {
       context->SelectDetected();
 
       const int selectionPassCount =
-          isControlPressed ? 1 : (isShiftPressed ? 2 : 1);
+          isControlPressed ? 1 : (isShiftPressed ? 3 : 1);
       bool handledVertex = false;
       for (int selectionPass = 0;
            selectionPass < selectionPassCount && !handledVertex;
            ++selectionPass) {
-        const bool edgePass = isControlPressed;
+        const bool edgePass =
+            isControlPressed || (isShiftPressed && selectionPass == 1);
         const bool vertexPass =
-            !edgePass && isShiftPressed && selectionPass == 0;
+            !isControlPressed && isShiftPressed && selectionPass == 0;
         if (selectionPass > 0) {
-          setSelectionModes(false, false, true);
-          context->UpdateCurrentViewer();
+          const bool edgeSelectionPass = isShiftPressed && !isControlPressed &&
+                                         selectionPass == 1;
+          setSelectionModes(false, edgeSelectionPass, !edgeSelectionPass);
           context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
                           view, Standard_True);
           context->SelectDetected();
@@ -2556,12 +2591,10 @@ int main(int argc, char *argv[]) {
               break;
             }
           }
-          if (selectedModel == nullptr || selectedModel->shapeTool.IsNull() ||
-              selectedModel->colorTool.IsNull()) {
+          if (selectedModel == nullptr || selectedModel->shapeTool.IsNull()) {
             continue;
           }
           const Handle(XCAFDoc_ShapeTool) &shapeTool = selectedModel->shapeTool;
-          const Handle(XCAFDoc_ColorTool) &colorTool = selectedModel->colorTool;
           const TDF_Label &rootLabel = selectedModel->rootLabel;
           const auto &labelSourceByEntry = selectedModel->labelSourceByEntry;
 
@@ -2683,6 +2716,7 @@ int main(int argc, char *argv[]) {
                 }
               }
             }
+            context->SetSelected(owner, Standard_False);
 
             TopTools_IndexedMapOfShape edgeVertices;
             for (TopExp_Explorer vertexIt(pickedEdge, TopAbs_VERTEX);
@@ -2712,7 +2746,10 @@ int main(int argc, char *argv[]) {
           TDF_Label targetFaceLabel;
           if (!shapeTool->FindSubShape(rootLabel, pickedFace,
                                        targetFaceLabel)) {
-            continue;
+            targetFaceLabel = shapeTool->AddSubShape(rootLabel, pickedFace);
+            if (targetFaceLabel.IsNull()) {
+              continue;
+            }
           }
 
           TCollection_AsciiString pickedEntry;
@@ -2720,6 +2757,7 @@ int main(int argc, char *argv[]) {
           const std::string pickedEntryStr = pickedEntry.ToCString();
 
           if (isShiftPressed) {
+            context->SetSelected(owner, Standard_False);
             TopoDS_Shape rootShape;
             Standard_Integer faceIndex = 0;
             if (shapeTool->GetShape(rootLabel, rootShape) &&
@@ -2737,18 +2775,41 @@ int main(int argc, char *argv[]) {
               }
             }
 
+            gp_Dir faceNormal;
+            bool hasFaceNormal = false;
+            const Handle(StdSelect_ViewerSelector3d) &selector =
+                context->MainSelector();
+            for (Standard_Integer pickIndex = 1;
+                 pickIndex <= selector->NbPicked(); ++pickIndex) {
+              if (selector->Picked(pickIndex) == owner) {
+                hasFaceNormal = FindFaceNormalAtPoint(
+                    pickedFace, selector->PickedPoint(pickIndex), faceNormal);
+                break;
+              }
+            }
             Quantity_Color faceColor;
             if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
                                             faceColor) ||
                 XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
                                             faceColor)) {
-              std::printf("#%02x%02x%02x face:%d\n",
+              std::printf("#%02x%02x%02x face:%d",
                           (int)round(255 * faceColor.Red()),
                           (int)round(255 * faceColor.Green()),
                           (int)round(255 * faceColor.Blue()), faceIndex);
+              if (hasFaceNormal) {
+                std::printf(" normal:%.17g,%.17g,%.17g", faceNormal.X(),
+                            faceNormal.Y(), faceNormal.Z());
+              }
+              std::printf("\n");
             } else {
               std::cout << pickedEntryStr << " face:" << faceIndex
-                        << " color:unset" << std::endl;
+                        << " color:unset";
+              if (hasFaceNormal) {
+                std::cout << " normal:" << std::setprecision(17)
+                          << faceNormal.X() << ',' << faceNormal.Y() << ','
+                          << faceNormal.Z();
+              }
+              std::cout << std::endl;
             }
             break;
           }
