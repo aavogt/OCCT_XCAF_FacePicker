@@ -23,6 +23,13 @@ cleanup() {
   fi
   rm -rf "$tmpdir"
 }
+remote_log="$tmpdir/nvim-remote.log"
+cat >"$tmpdir/nvim-remote.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >>"$NVIM_REMOTE_LOG"
+EOF
+chmod +x "$tmpdir/nvim-remote.sh"
+export NVIM_REMOTE_LOG="$remote_log"
 trap cleanup EXIT
 
 colorless_model="$tmpdir/colorless.step"
@@ -43,7 +50,7 @@ if awk '/COLOUR_RGB|STYLED_ITEM/ { found = 1 } END { exit !found }' \
 fi
 
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-(cd "$tmpdir" && exec "$binary" "$colorless_model") >"$tmpdir/viewer.log" 2>&1 &
+(cd "$tmpdir" && PATH="$tmpdir:$PATH" exec "$binary" "$colorless_model") >"$tmpdir/viewer.log" 2>&1 &
 viewer_pid=$!
 window_id=$(timeout 20s xdotool search --sync --onlyvisible \
   --name '^OCCT XCAF Face Picker$') || {
@@ -54,14 +61,21 @@ window_id=$(timeout 20s xdotool search --sync --onlyvisible \
 xdotool windowfocus --sync "$window_id"
 sleep 1
 
-# Click a face, a vertex, and an edge; the uncolored model must still print.
+# Regular clicks report every candidate by type; Shift-left opens its source.
+for coordinates in "800 450" "640 360" "950 360"; do
+  read -r mouse_x mouse_y <<<"$coordinates"
+  xdotool mousemove --window "$window_id" "$mouse_x" "$mouse_y"
+  sleep 0.2
+  xdotool mousedown 1
+  sleep 0.2
+  xdotool mouseup 1
+  sleep 0.3
+done
+if [[ -e "$remote_log" ]]; then
+  printf 'plain left-click unexpectedly launched nvim-remote\n' >&2
+  exit 1
+fi
 xdotool mousemove --window "$window_id" 800 450
-sleep 0.2
-xdotool mousedown 1
-sleep 0.2
-xdotool mouseup 1
-sleep 0.3
-xdotool mousemove --window "$window_id" 640 360
 xdotool keydown --window "$window_id" Shift_L
 sleep 0.2
 xdotool mousedown 1
@@ -69,32 +83,31 @@ sleep 0.2
 xdotool mouseup 1
 sleep 0.2
 xdotool keyup --window "$window_id" Shift_L
-sleep 0.3
-xdotool mousemove --window "$window_id" 950 360
-xdotool keydown --window "$window_id" Control_L
-sleep 0.2
-xdotool mousedown 1
-sleep 0.2
-xdotool mouseup 1
-sleep 0.2
-xdotool keyup --window "$window_id" Control_L
-sleep 0.3
+for attempt in {1..20}; do
+  [[ -s "$remote_log" ]] && break
+  sleep 0.1
+done
 
 selection_output=$(cat "$tmpdir/viewer.log")
 case "$selection_output" in
-  *'main.hs:'*) ;;
-  *) printf '%s\n' "$selection_output" >&2; printf 'face selection did not print\n' >&2; exit 1 ;;
+  *'E:'*) ;;
+  *) printf '%s\n' "$selection_output" >&2; printf 'edge candidate did not print\n' >&2; exit 1 ;;
 esac
 case "$selection_output" in
-  *':v'[0-9]*' snap:'*) ;;
-  *) printf '%s\n' "$selection_output" >&2; printf 'vertex query did not print\n' >&2; exit 1 ;;
+  *'F:'*) ;;
+  *) printf '%s\n' "$selection_output" >&2; printf 'face candidate did not print\n' >&2; exit 1 ;;
 esac
 case "$selection_output" in
-  *' edge:'[0-9]*' length:'*) ;;
-  *) printf '%s\n' "$selection_output" >&2; printf 'edge query did not print\n' >&2; exit 1 ;;
+  *'V:'*) ;;
+  *) printf '%s\n' "$selection_output" >&2; printf 'vertex candidate did not print\n' >&2; exit 1 ;;
 esac
 case "$selection_output" in
   *colorQuery*) printf '%s\n' "$selection_output" >&2; printf 'unexpected colorQuery output\n' >&2; exit 1 ;;
 esac
+case "$(cat "$remote_log" 2>/dev/null || true)" in
+  *'main.hs:'*) ;;
+  *) printf 'shift-left did not invoke nvim-remote with the source location\n' >&2; exit 1 ;;
+esac
 printf '%s\n' "$selection_output"
-printf 'colorless face, vertex, and edge selections passed\n'
+printf 'colorless face, vertex, edge, and source navigation passed\n'
+

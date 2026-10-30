@@ -77,12 +77,15 @@ opens all `.step` files in the current directory and applies the state:
 OCCT_XCAF_FacePicker "$state"
 ```
 
-## Vertex and face query
+## Selection feedback
 
-Alt- or Shift-left-click first queries a picked vertex; if no vertex query is possible, it prints the picked face color as `#rrggbb face:<index>`. If the face has no color, it prints `<label> face:<index> color:unset`.
+Moving over a model highlights every detected candidate: vertices red, edges
+green, and faces blue. A regular left-click prints candidate details, grouped
+by type and prefixed `E:`, `F:`, and `V:`. Shift-left-click opens the mapped
+face source location with `nvim-remote.sh`.
 
-Vertex query output includes the vertex index, coordinates (`snap`), mouse hit point (`stab`), mouse coordinate, and camera state. Incident face colors are appended when available:
-
-```text
-model.step:0:1:1:1:v3 snap:1.23,2.34,5.67 stab:1.0,2.3,5.6 mouse:478,822 eyexyz:targetxyz:upxyz:screenxy [colorQuery|rrggbbrrggbb|]
-```
+Vertex output includes its index and coordinates (`snap`), mouse hit point
+(`stab`), mouse coordinate, camera state, and incident face colors when
+available. Edge output includes its index, length, stabbing point, and Frenet
+frame when available. Face output includes its index, color, and normal when
+available.

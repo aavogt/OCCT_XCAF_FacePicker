@@ -93,21 +93,21 @@
 #include <XCAFPrs_AISObject.hxx>
 
 // Modeling & Structural Helpers
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
-#include <BRepAdaptor_Curve.hxx>
 #include <BRepLProp_CLProps.hxx>
-#include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Extrema_ExtPC.hxx>
 #include <GProp_GProps.hxx>
-#include <Geom_Surface.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <Quantity_Color.hxx>
-#include <Extrema_ExtPC.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -987,8 +987,7 @@ bool FindEdgeFrenetFrame(const TopoDS_Edge &edge, const gp_Pnt &queryPoint,
       // Gram-Schmidt the world axes after the tangent for zero curvature.
       const gp_Vec tangentVector(tangentOut);
       const std::array<gp_Vec, 3> basisAxes = {
-          gp_Vec(1.0, 0.0, 0.0), gp_Vec(0.0, 1.0, 0.0),
-          gp_Vec(0.0, 0.0, 1.0)};
+          gp_Vec(1.0, 0.0, 0.0), gp_Vec(0.0, 1.0, 0.0), gp_Vec(0.0, 0.0, 1.0)};
       gp_Vec normalVector;
       bool foundNormal = false;
       for (const gp_Vec &axis : basisAxes) {
@@ -1422,9 +1421,8 @@ int main(int argc, char *argv[]) {
                  "adjust transparency\n"
                  "\tShift+wheel adjusts focused-file transparency; wheel "
                  "zooms\n"
-                 "Left click a model to jump to source; Shift-left for "
-                 "vertex/edge query and face color/normal; Ctrl-left for edge "
-                 "queries and Frenet frame\n"
+                 "Left click prints E/F/V candidate data; Shift-left opens "
+                 "the source in nvim-remote\n"
                  "\tMiddle click to pan\n\tRight click to rotate\n"
                  "\tUp/Down to select a file (wrap); Space toggles visibility\n"
                  "\tT to toggle file list\n\tC to print camera state\n"
@@ -1621,6 +1619,8 @@ int main(int argc, char *argv[]) {
   viewer->SetLightOn();
 
   Handle(AIS_InteractiveContext) context = new AIS_InteractiveContext(viewer);
+  context->SetPixelTolerance(5);
+  context->SetAutomaticHilight(Standard_False);
   Handle(V3d_View) view = viewer->CreateView();
   view->SetWindow(occtWindow, occtWindow->NativeGlContext());
   if (!occtWindow->IsMapped()) {
@@ -1670,6 +1670,15 @@ int main(int argc, char *argv[]) {
         Graphic3d_TypeOfShadingModel_Pbr);
   }
   configurePbrMaterial(defaultShadingAspect->Aspect());
+  Handle(Prs3d_Drawer) vertexPickStyle = new Prs3d_Drawer();
+  vertexPickStyle->Link(context->DefaultDrawer());
+  vertexPickStyle->SetColor(Quantity_NOC_RED);
+  Handle(Prs3d_Drawer) edgePickStyle = new Prs3d_Drawer();
+  edgePickStyle->Link(context->DefaultDrawer());
+  edgePickStyle->SetColor(Quantity_NOC_GREEN);
+  Handle(Prs3d_Drawer) facePickStyle = new Prs3d_Drawer();
+  facePickStyle->Link(context->DefaultDrawer());
+  facePickStyle->SetColor(Quantity_NOC_BLUE);
 
   const Standard_Boolean kApplyTintColor = Standard_False;
   const Quantity_Color kTintColor(0.80, 0.88, 1.00, Quantity_TOC_RGB);
@@ -1678,7 +1687,8 @@ int main(int argc, char *argv[]) {
   std::size_t selectedModelIndex = 0;
   bool modelListVisible = true;
   bool wasShiftPressed = false;
-  bool wasControlPressed = false;
+  std::vector<Handle(StdSelect_BRepOwner)> highlightedPickOwners;
+  bool pickFeedbackNeedsRefresh = true;
 
 #ifndef _WIN32
   int forwardNavSocketFd = -1;
@@ -1853,6 +1863,10 @@ int main(int argc, char *argv[]) {
         }
       }
     }
+    for (const Handle(StdSelect_BRepOwner) & owner : highlightedPickOwners) {
+      owner->Unhilight(context->MainPrsMgr(), 0);
+    }
+    highlightedPickOwners.clear();
     std::vector<LoadedStepModel> oldModels = std::move(models);
     for (LoadedStepModel &oldModel : oldModels) {
       if (!oldModel.presentation.IsNull()) {
@@ -1884,11 +1898,11 @@ int main(int argc, char *argv[]) {
       context->SetSelectionModeActive(loadedModel.presentation, 0,
                                       Standard_False);
       context->SetSelectionModeActive(loadedModel.presentation, 1,
-                                      wasShiftPressed && !wasControlPressed);
+                                      Standard_True);
       context->SetSelectionModeActive(loadedModel.presentation, 2,
-                                      wasControlPressed);
+                                      Standard_True);
       context->SetSelectionModeActive(loadedModel.presentation, 4,
-                                      !wasShiftPressed && !wasControlPressed);
+                                      Standard_True);
       context->SetTransparency(loadedModel.presentation,
                                loadedModel.transparency, Standard_False);
       if (kApplyTintColor) {
@@ -1905,6 +1919,7 @@ int main(int argc, char *argv[]) {
     }
     view->ZFitAll();
     context->UpdateCurrentViewer();
+    pickFeedbackNeedsRefresh = true;
     return true;
   };
   auto setSelectionModes = [&](const bool vertexMode, const bool edgeMode,
@@ -1988,12 +2003,9 @@ int main(int argc, char *argv[]) {
     if (model.visible) {
       context->Display(model.presentation, AIS_Shaded, 0, Standard_False);
       context->SetSelectionModeActive(model.presentation, 0, Standard_False);
-      context->SetSelectionModeActive(model.presentation, 1,
-                                      wasShiftPressed && !wasControlPressed);
-      context->SetSelectionModeActive(model.presentation, 2,
-                                      wasControlPressed);
-      context->SetSelectionModeActive(model.presentation, 4,
-                                      !wasShiftPressed && !wasControlPressed);
+      context->SetSelectionModeActive(model.presentation, 1, Standard_True);
+      context->SetSelectionModeActive(model.presentation, 2, Standard_True);
+      context->SetSelectionModeActive(model.presentation, 4, Standard_True);
       for (const Handle(AIS_TexturedShape) & checkerboard :
            model.checkerboardPresentations) {
         context->Display(checkerboard, 3, 0, Standard_False);
@@ -2041,13 +2053,12 @@ int main(int argc, char *argv[]) {
   };
 
   const std::vector<const char *> helpKeys = {
-      "Left click", "Shift+LMB", "Ctrl+LMB", "Middle drag", "Right drag",
-      "Up/Down",    "Space",     "T",        "C",           "H",
-      "Esc",        "Shift+wheel", ".step drag"};
+      "Left click", "Shift+LMB", "Middle drag", "Right drag",
+      "Up/Down",    "Space",     "T",           "C",
+      "H",          "Esc",       "Shift+wheel", ".step drag"};
   const std::vector<const char *> helpDescriptions = {
-      "toggle basename / jump to source",
-      "vertex query; edge query; face color/normal fallback",
-      "edge vertices, index, length and Frenet frame",
+      "print E/F/V candidate data",
+      "jump to source in nvim-remote",
       "pan",
       "rotate",
       "select file (wrap); hover model",
@@ -2066,7 +2077,6 @@ int main(int argc, char *argv[]) {
     helpLabels2.push_back(createHelpLabel(helpDescriptions[i], 100, y));
   }
   const Handle(AIS_TextLabel) modifierHelpLabel = helpLabels1[1];
-  const Handle(AIS_TextLabel) controlHelpLabel = helpLabels1[2];
   const Handle(AIS_TextLabel) collapsedHelpLabel =
       createHelpLabel("h(elp)", 14, 14);
   context->Erase(collapsedHelpLabel, Standard_False);
@@ -2272,13 +2282,12 @@ int main(int argc, char *argv[]) {
         }
       }
     }
+    setSelectionModes(true, true, true);
+    context->UpdateCurrentViewer();
 
     gp_Pnt stabPoint;
     const bool hasRayHit =
         FindMouseRayHit(view, query.mouseX, query.mouseY, rootShape, stabPoint);
-    setSelectionModes(wasShiftPressed && !wasControlPressed,
-                      wasControlPressed,
-                      !wasShiftPressed && !wasControlPressed);
     if (!hasRayHit) {
       std::cerr << "Mouse vertex replay ignored (query='" << rawQueryLine
                 << "')" << std::endl;
@@ -2497,11 +2506,13 @@ int main(int argc, char *argv[]) {
                                            GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                                 glfwGetKey(occtWindow->getGlfwWindow(),
                                            GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-    const bool isControlPressed =
-        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_LEFT_CONTROL) ==
-            GLFW_PRESS ||
-        glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_RIGHT_CONTROL) ==
-            GLFW_PRESS;
+    if (isShiftPressed != wasShiftPressed) {
+      context->UpdateCurrentViewer();
+      modifierHelpLabel->SetColor(isShiftPressed ? activeHelpTextColor
+                                                 : helpTextColor);
+      context->Redisplay(modifierHelpLabel, Standard_False);
+      dirty = true;
+    }
     if (scrollContext.deltaY != 0.0) {
       if (isShiftPressed && !models.empty()) {
         setModelTransparency(models[selectedModelIndex],
@@ -2515,23 +2526,9 @@ int main(int argc, char *argv[]) {
       }
       scrollContext.deltaY = 0.0;
     }
-    if (isShiftPressed != wasShiftPressed ||
-        isControlPressed != wasControlPressed) {
-      setSelectionModes(isShiftPressed && !isControlPressed,
-                        isControlPressed,
-                        !isShiftPressed && !isControlPressed);
-      context->UpdateCurrentViewer();
-      modifierHelpLabel->SetColor(isShiftPressed ? activeHelpTextColor
-                                                 : helpTextColor);
-      controlHelpLabel->SetColor(isControlPressed ? activeHelpTextColor
-                                                  : helpTextColor);
-      context->Redisplay(modifierHelpLabel, Standard_False);
-      context->Redisplay(controlHelpLabel, Standard_False);
-      dirty = true;
-    }
 
     context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY, view,
-                    Standard_True);
+                    Standard_False);
     const bool isUpPressed =
         glfwGetKey(occtWindow->getGlfwWindow(), GLFW_KEY_UP) == GLFW_PRESS;
     const bool isDownPressed =
@@ -2543,8 +2540,10 @@ int main(int argc, char *argv[]) {
                                modelListPanelWidth) &&
         mouseY >= 10.0 &&
         mouseY < 32.0 + static_cast<double>(models.size() - 1) * 22.0;
-    if (!hasPreviousMousePosition || mouseX != previousMouseX ||
-        mouseY != previousMouseY) {
+    const bool pointerMoved = !hasPreviousMousePosition ||
+                              mouseX != previousMouseX ||
+                              mouseY != previousMouseY;
+    if (pointerMoved) {
       hasPreviousMousePosition = true;
       previousMouseX = mouseX;
       previousMouseY = mouseY;
@@ -2563,6 +2562,40 @@ int main(int argc, char *argv[]) {
           }
         }
       }
+    }
+    if (pointerMoved || pickFeedbackNeedsRefresh ||
+        dirty.load(std::memory_order_acquire)) {
+      for (const Handle(StdSelect_BRepOwner) & owner : highlightedPickOwners) {
+        owner->Unhilight(context->MainPrsMgr(), 0);
+      }
+      highlightedPickOwners.clear();
+      if (!pointerOverModelList) {
+        const Handle(StdSelect_ViewerSelector3d) &selector =
+            context->MainSelector();
+        for (int typePass = 0; typePass < 3; ++typePass) {
+          const TopAbs_ShapeEnum wantedType = typePass == 0   ? TopAbs_FACE
+                                              : typePass == 1 ? TopAbs_EDGE
+                                                              : TopAbs_VERTEX;
+          for (Standard_Integer pickIndex = 1;
+               pickIndex <= selector->NbPicked(); ++pickIndex) {
+            Handle(StdSelect_BRepOwner) owner = Handle(
+                StdSelect_BRepOwner)::DownCast(selector->Picked(pickIndex));
+            if (owner.IsNull() || !owner->HasShape() ||
+                owner->Shape().ShapeType() != wantedType) {
+              continue;
+            }
+            const Handle(Prs3d_Drawer) &style =
+                wantedType == TopAbs_VERTEX ? vertexPickStyle
+                : wantedType == TopAbs_EDGE ? edgePickStyle
+                                            : facePickStyle;
+            owner->HilightWithColor(context->MainPrsMgr(), style, 0);
+            highlightedPickOwners.push_back(owner);
+          }
+        }
+      }
+      context->UpdateCurrentViewer();
+      dirty = true;
+      pickFeedbackNeedsRefresh = false;
     }
 
     if (models.size() > 1 && ((isUpPressed && !wasUpPressed) ||
@@ -2657,32 +2690,22 @@ int main(int argc, char *argv[]) {
       dirty = true;
     }
 
-    // Shift tries vertices, then edges, then face color; Ctrl selects edges.
+    // Click candidates in the order requested by the command-line output.
     if (isLeftPressed && !wasLeftPressed && !isRightPressed &&
         !isMiddlePressed && !selectedListRowClick) {
-      context->SelectDetected();
-
-      const int selectionPassCount =
-          isControlPressed ? 1 : (isShiftPressed ? 3 : 1);
-      bool handledVertex = false;
-      for (int selectionPass = 0;
-           selectionPass < selectionPassCount && !handledVertex;
+      const int selectionPassCount = isShiftPressed ? 1 : 3;
+      const Handle(StdSelect_ViewerSelector3d) &selector =
+          context->MainSelector();
+      for (int selectionPass = 0; selectionPass < selectionPassCount;
            ++selectionPass) {
-        const bool edgePass =
-            isControlPressed || (isShiftPressed && selectionPass == 1);
-        const bool vertexPass =
-            !isControlPressed && isShiftPressed && selectionPass == 0;
-        if (selectionPass > 0) {
-          const bool edgeSelectionPass = isShiftPressed && !isControlPressed &&
-                                         selectionPass == 1;
-          setSelectionModes(false, edgeSelectionPass, !edgeSelectionPass);
-          context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
-                          view, Standard_True);
-          context->SelectDetected();
-        }
-        for (context->InitSelected(); context->MoreSelected();
-             context->NextSelected()) {
-          Handle(SelectMgr_EntityOwner) owner = context->SelectedOwner();
+        const TopAbs_ShapeEnum wantedType =
+            isShiftPressed ? TopAbs_FACE
+                           : (selectionPass == 0   ? TopAbs_EDGE
+                              : selectionPass == 1 ? TopAbs_FACE
+                                                   : TopAbs_VERTEX);
+        for (Standard_Integer pickIndex = 1; pickIndex <= selector->NbPicked();
+             ++pickIndex) {
+          Handle(SelectMgr_EntityOwner) owner = selector->Picked(pickIndex);
           Handle(StdSelect_BRepOwner) brepOwner =
               Handle(StdSelect_BRepOwner)::DownCast(owner);
 
@@ -2706,8 +2729,7 @@ int main(int argc, char *argv[]) {
           TopoDS_Shape pickedShape = brepOwner->Shape();
           const bool isVertex = pickedShape.ShapeType() == TopAbs_VERTEX;
           const bool isEdge = pickedShape.ShapeType() == TopAbs_EDGE;
-          if ((vertexPass && !isVertex) || (edgePass && !isEdge) ||
-              (!vertexPass && !edgePass && (isVertex || isEdge))) {
+          if (pickedShape.ShapeType() != wantedType) {
             continue;
           }
 
@@ -2748,8 +2770,8 @@ int main(int argc, char *argv[]) {
             TopExp::MapShapesAndAncestors(rootShape, TopAbs_VERTEX, TopAbs_FACE,
                                           vertexFaces);
 
-            std::cout << modelEntry << " snap:" << vertexPoint.X() << ','
-                      << vertexPoint.Y() << ',' << vertexPoint.Z()
+            std::cout << "V:" << modelEntry << " snap:" << vertexPoint.X()
+                      << ',' << vertexPoint.Y() << ',' << vertexPoint.Z()
                       << " stab:" << std::setprecision(17) << stabPoint.X()
                       << ',' << stabPoint.Y() << ',' << stabPoint.Z()
                       << " mouse:" << mouseX << "," << mouseY << ' '
@@ -2794,18 +2816,15 @@ int main(int argc, char *argv[]) {
             return true;
           };
 
-          if (vertexPass || edgePass) {
+          if (isVertex || isEdge) {
             TopoDS_Shape rootShape;
             if (!shapeTool->GetShape(rootLabel, rootShape) ||
                 rootShape.IsNull()) {
               continue;
             }
 
-            if (vertexPass) {
-              if (printVertexQuery(TopoDS::Vertex(pickedShape), rootShape)) {
-                handledVertex = true;
-                break;
-              }
+            if (isVertex) {
+              (void)printVertexQuery(TopoDS::Vertex(pickedShape), rootShape);
               continue;
             }
 
@@ -2833,24 +2852,13 @@ int main(int argc, char *argv[]) {
                 break;
               }
             }
-            context->SetSelected(owner, Standard_False);
-
-            TopTools_IndexedMapOfShape edgeVertices;
-            for (TopExp_Explorer vertexIt(pickedEdge, TopAbs_VERTEX);
-                 vertexIt.More(); vertexIt.Next()) {
-              const TopoDS_Vertex edgeVertex =
-                  TopoDS::Vertex(vertexIt.Current());
-              if (!edgeVertices.Contains(edgeVertex)) {
-                edgeVertices.Add(edgeVertex);
-                (void)printVertexQuery(edgeVertex, rootShape);
-              }
-            }
 
             GProp_GProps edgeProperties;
             BRepGProp::LinearProperties(pickedEdge, edgeProperties);
-            std::cout << selectedModel->path.filename().string()
-                      << " edge:" << edgeIndex << " length:"
-                      << std::setprecision(17) << edgeProperties.Mass();
+            std::cout << "E:" << selectedModel->path.filename().string()
+                      << " edge:" << edgeIndex
+                      << " length:" << std::setprecision(17)
+                      << edgeProperties.Mass();
             if (hasStabbingPoint) {
               gp_Pnt closestPoint;
               gp_Dir tangent;
@@ -2867,9 +2875,8 @@ int main(int argc, char *argv[]) {
                           << ',' << tangent.Z();
                 if (hasNormal) {
                   std::cout << " normal:" << normal.X() << ',' << normal.Y()
-                            << ',' << normal.Z() << " binormal:"
-                            << binormal.X() << ',' << binormal.Y() << ','
-                            << binormal.Z();
+                            << ',' << normal.Z() << " binormal:" << binormal.X()
+                            << ',' << binormal.Y() << ',' << binormal.Z();
                 } else {
                   std::cout << " normal:undefined binormal:undefined";
                 }
@@ -2880,8 +2887,7 @@ int main(int argc, char *argv[]) {
               std::cout << " frenet:unavailable";
             }
             std::cout << std::endl;
-            handledVertex = true;
-            break;
+            continue;
           }
           if (pickedShape.ShapeType() != TopAbs_FACE) {
             continue;
@@ -2902,89 +2908,66 @@ int main(int argc, char *argv[]) {
           const std::string pickedEntryStr = pickedEntry.ToCString();
 
           if (isShiftPressed) {
-            context->SetSelected(owner, Standard_False);
-            TopoDS_Shape rootShape;
-            Standard_Integer faceIndex = 0;
-            if (shapeTool->GetShape(rootLabel, rootShape) &&
-                !rootShape.IsNull()) {
-              TopTools_IndexedMapOfShape faceMap;
-              TopExp::MapShapes(rootShape, TopAbs_FACE, faceMap);
-              faceIndex = faceMap.FindIndex(pickedFace);
-              if (faceIndex == 0) {
-                for (Standard_Integer i = 1; i <= faceMap.Extent(); ++i) {
-                  if (faceMap(i).IsSame(pickedFace)) {
-                    faceIndex = i;
-                    break;
-                  }
+            const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
+            if (sourceIt != labelSourceByEntry.end()) {
+              if (!LaunchNvimRemote(sourceIt->second)) {
+                std::cerr
+                    << "Warning: failed to launch nvim-remote.sh for source: "
+                    << sourceIt->second << std::endl;
+              }
+              break;
+            }
+            continue;
+          }
+
+          Standard_Integer faceIndex = 0;
+          TopoDS_Shape rootShape;
+          if (shapeTool->GetShape(rootLabel, rootShape) &&
+              !rootShape.IsNull()) {
+            TopTools_IndexedMapOfShape faceMap;
+            TopExp::MapShapes(rootShape, TopAbs_FACE, faceMap);
+            faceIndex = faceMap.FindIndex(pickedFace);
+            if (faceIndex == 0) {
+              for (Standard_Integer i = 1; i <= faceMap.Extent(); ++i) {
+                if (faceMap(i).IsSame(pickedFace)) {
+                  faceIndex = i;
+                  break;
                 }
               }
             }
-
-            gp_Dir faceNormal;
-            bool hasFaceNormal = false;
-            const Handle(StdSelect_ViewerSelector3d) &selector =
-                context->MainSelector();
-            for (Standard_Integer pickIndex = 1;
-                 pickIndex <= selector->NbPicked(); ++pickIndex) {
-              if (selector->Picked(pickIndex) == owner) {
-                hasFaceNormal = FindFaceNormalAtPoint(
-                    pickedFace, selector->PickedPoint(pickIndex), faceNormal);
-                break;
-              }
-            }
-            Quantity_Color faceColor;
-            if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
-                                            faceColor) ||
-                XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
-                                            faceColor)) {
-              std::printf("#%02x%02x%02x face:%d",
-                          (int)round(255 * faceColor.Red()),
-                          (int)round(255 * faceColor.Green()),
-                          (int)round(255 * faceColor.Blue()), faceIndex);
-              if (hasFaceNormal) {
-                std::printf(" normal:%.17g,%.17g,%.17g", faceNormal.X(),
-                            faceNormal.Y(), faceNormal.Z());
-              }
-              std::printf("\n");
-            } else {
-              std::cout << pickedEntryStr << " face:" << faceIndex
-                        << " color:unset";
-              if (hasFaceNormal) {
-                std::cout << " normal:" << std::setprecision(17)
-                          << faceNormal.X() << ',' << faceNormal.Y() << ','
-                          << faceNormal.Z();
-              }
-              std::cout << std::endl;
-            }
-            break;
           }
 
-          if (models.size() > 1) {
-            std::cout << selectedModel->path.filename().string() << ":";
-          }
-          std::cout << pickedEntryStr;
-          const auto sourceIt = labelSourceByEntry.find(pickedEntryStr);
-          if (sourceIt != labelSourceByEntry.end()) {
-            std::cout << ":" << sourceIt->second;
-            if (!LaunchNvimRemote(sourceIt->second)) {
-              std::cerr
-                  << "Warning: failed to launch nvim-remote.sh for source: "
-                  << sourceIt->second << std::endl;
+          gp_Dir faceNormal;
+          bool hasFaceNormal = false;
+          for (Standard_Integer candidateIndex = 1;
+               candidateIndex <= selector->NbPicked(); ++candidateIndex) {
+            if (selector->Picked(candidateIndex) == owner) {
+              hasFaceNormal = FindFaceNormalAtPoint(
+                  pickedFace, selector->PickedPoint(candidateIndex),
+                  faceNormal);
+              break;
             }
+          }
+          Quantity_Color faceColor;
+          std::cout << "F:" << selectedModel->path.filename().string() << ':'
+                    << pickedEntryStr << " face:" << faceIndex;
+          if (XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorSurf,
+                                          faceColor) ||
+              XCAFDoc_ColorTool::GetColor(targetFaceLabel, XCAFDoc_ColorGen,
+                                          faceColor)) {
+            std::printf(" color:#%02x%02x%02x",
+                        (int)round(255 * faceColor.Red()),
+                        (int)round(255 * faceColor.Green()),
+                        (int)round(255 * faceColor.Blue()));
+          } else {
+            std::cout << " color:unset";
+          }
+          if (hasFaceNormal) {
+            std::cout << " normal:" << std::setprecision(17) << faceNormal.X()
+                      << ',' << faceNormal.Y() << ',' << faceNormal.Z();
           }
           std::cout << std::endl;
         }
-        if (handledVertex) {
-          break;
-        }
-      }
-      if (isShiftPressed || isControlPressed) {
-        setSelectionModes(isShiftPressed && !isControlPressed,
-                          isControlPressed,
-                          !isShiftPressed && !isControlPressed);
-        context->UpdateCurrentViewer();
-        context->MoveTo((Standard_Integer)mouseX, (Standard_Integer)mouseY,
-                        view, Standard_True);
       }
       dirty = true;
     }
@@ -2994,7 +2977,6 @@ int main(int argc, char *argv[]) {
     wasMiddlePressed = isMiddlePressed;
     wasSpacePressed = isSpacePressed;
     wasShiftPressed = isShiftPressed;
-    wasControlPressed = isControlPressed;
 
     if (dirty.exchange(false, std::memory_order_acquire)) {
       view->Redraw();
