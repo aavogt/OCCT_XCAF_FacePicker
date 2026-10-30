@@ -95,6 +95,8 @@
 // Modeling & Structural Helpers
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepLProp_CLProps.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
@@ -105,6 +107,7 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Precision.hxx>
 #include <Quantity_Color.hxx>
+#include <Extrema_ExtPC.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -923,6 +926,107 @@ bool FindFaceNormalAtPoint(const TopoDS_Face &face, const gp_Pnt &pickedPoint,
   }
 }
 
+bool FindEdgeFrenetFrame(const TopoDS_Edge &edge, const gp_Pnt &queryPoint,
+                         gp_Pnt &closestPoint, gp_Dir &tangentOut,
+                         gp_Dir &normalOut, gp_Dir &binormalOut,
+                         bool &hasNormalOut) {
+  hasNormalOut = false;
+  try {
+    const BRepAdaptor_Curve curve(edge);
+    const Standard_Real firstParameter = curve.FirstParameter();
+    const Standard_Real lastParameter = curve.LastParameter();
+    if (!std::isfinite(firstParameter) || !std::isfinite(lastParameter) ||
+        firstParameter > lastParameter) {
+      return false;
+    }
+
+    Standard_Real closestParameter = firstParameter;
+    Standard_Real closestDistance =
+        queryPoint.SquareDistance(curve.Value(firstParameter));
+    const Standard_Real lastDistance =
+        queryPoint.SquareDistance(curve.Value(lastParameter));
+    if (lastDistance < closestDistance) {
+      closestDistance = lastDistance;
+      closestParameter = lastParameter;
+    }
+
+    Extrema_ExtPC projection(queryPoint, curve, firstParameter, lastParameter,
+                             Precision::Confusion());
+    if (!projection.IsDone()) {
+      return false;
+    }
+    for (Standard_Integer i = 1; i <= projection.NbExt(); ++i) {
+      const Standard_Real distance = projection.SquareDistance(i);
+      if (projection.IsMin(i) && distance < closestDistance) {
+        closestDistance = distance;
+        closestParameter = projection.Point(i).Parameter();
+      }
+    }
+
+    BRepLProp_CLProps localProperties(curve, closestParameter, 2,
+                                      Precision::Confusion());
+    if (!localProperties.IsTangentDefined()) {
+      return false;
+    }
+    closestPoint = localProperties.Value();
+    localProperties.Tangent(tangentOut);
+    if (edge.Orientation() == TopAbs_REVERSED) {
+      tangentOut.Reverse();
+    }
+
+    if (localProperties.Curvature() > Precision::Confusion()) {
+      try {
+        localProperties.Normal(normalOut);
+        binormalOut = tangentOut.Crossed(normalOut);
+        hasNormalOut = true;
+      } catch (const Standard_Failure &) {
+        hasNormalOut = false;
+      }
+    }
+    if (!hasNormalOut) {
+      // Gram-Schmidt the world axes after the tangent for zero curvature.
+      const gp_Vec tangentVector(tangentOut);
+      const std::array<gp_Vec, 3> basisAxes = {
+          gp_Vec(1.0, 0.0, 0.0), gp_Vec(0.0, 1.0, 0.0),
+          gp_Vec(0.0, 0.0, 1.0)};
+      gp_Vec normalVector;
+      bool foundNormal = false;
+      for (const gp_Vec &axis : basisAxes) {
+        normalVector = axis;
+        normalVector -= tangentVector.Multiplied(axis.Dot(tangentVector));
+        if (normalVector.SquareMagnitude() > Precision::SquareConfusion()) {
+          normalVector.Normalize();
+          foundNormal = true;
+          break;
+        }
+      }
+
+      if (foundNormal) {
+        for (const gp_Vec &axis : basisAxes) {
+          gp_Vec binormalVector = axis;
+          binormalVector -= tangentVector.Multiplied(axis.Dot(tangentVector));
+          binormalVector -= normalVector.Multiplied(axis.Dot(normalVector));
+          if (binormalVector.SquareMagnitude() <=
+              Precision::SquareConfusion()) {
+            continue;
+          }
+          binormalVector.Normalize();
+          if (tangentVector.Crossed(normalVector).Dot(binormalVector) < 0.0) {
+            binormalVector.Reverse();
+          }
+          normalOut = gp_Dir(normalVector);
+          binormalOut = gp_Dir(binormalVector);
+          hasNormalOut = true;
+          break;
+        }
+      }
+    }
+    return true;
+  } catch (const Standard_Failure &) {
+    return false;
+  }
+}
+
 bool FindVertexByIndex(const TopoDS_Shape &shape,
                        const Standard_Integer vertexIndex,
                        TopoDS_Vertex &vertexOut) {
@@ -1319,7 +1423,8 @@ int main(int argc, char *argv[]) {
                  "\tShift+wheel adjusts focused-file transparency; wheel "
                  "zooms\n"
                  "Left click a model to jump to source; Shift-left for "
-                 "vertex/edge query and face color/normal; Ctrl-left for edge queries\n"
+                 "vertex/edge query and face color/normal; Ctrl-left for edge "
+                 "queries and Frenet frame\n"
                  "\tMiddle click to pan\n\tRight click to rotate\n"
                  "\tUp/Down to select a file (wrap); Space toggles visibility\n"
                  "\tT to toggle file list\n\tC to print camera state\n"
@@ -1942,7 +2047,7 @@ int main(int argc, char *argv[]) {
   const std::vector<const char *> helpDescriptions = {
       "toggle basename / jump to source",
       "vertex query; edge query; face color/normal fallback",
-      "edge vertices, index and length",
+      "edge vertices, index, length and Frenet frame",
       "pan",
       "rotate",
       "select file (wrap); hover model",
@@ -2716,6 +2821,18 @@ int main(int argc, char *argv[]) {
                 }
               }
             }
+            gp_Pnt stabbingPoint;
+            bool hasStabbingPoint = false;
+            const Handle(StdSelect_ViewerSelector3d) &selector =
+                context->MainSelector();
+            for (Standard_Integer pickIndex = 1;
+                 pickIndex <= selector->NbPicked(); ++pickIndex) {
+              if (selector->Picked(pickIndex) == owner) {
+                stabbingPoint = selector->PickedPoint(pickIndex);
+                hasStabbingPoint = true;
+                break;
+              }
+            }
             context->SetSelected(owner, Standard_False);
 
             TopTools_IndexedMapOfShape edgeVertices;
@@ -2733,8 +2850,36 @@ int main(int argc, char *argv[]) {
             BRepGProp::LinearProperties(pickedEdge, edgeProperties);
             std::cout << selectedModel->path.filename().string()
                       << " edge:" << edgeIndex << " length:"
-                      << std::setprecision(17) << edgeProperties.Mass()
-                      << std::endl;
+                      << std::setprecision(17) << edgeProperties.Mass();
+            if (hasStabbingPoint) {
+              gp_Pnt closestPoint;
+              gp_Dir tangent;
+              gp_Dir normal;
+              gp_Dir binormal;
+              bool hasNormal = false;
+              std::cout << " stab:" << stabbingPoint.X() << ','
+                        << stabbingPoint.Y() << ',' << stabbingPoint.Z();
+              if (FindEdgeFrenetFrame(pickedEdge, stabbingPoint, closestPoint,
+                                      tangent, normal, binormal, hasNormal)) {
+                std::cout << " closest:" << closestPoint.X() << ','
+                          << closestPoint.Y() << ',' << closestPoint.Z()
+                          << " tangent:" << tangent.X() << ',' << tangent.Y()
+                          << ',' << tangent.Z();
+                if (hasNormal) {
+                  std::cout << " normal:" << normal.X() << ',' << normal.Y()
+                            << ',' << normal.Z() << " binormal:"
+                            << binormal.X() << ',' << binormal.Y() << ','
+                            << binormal.Z();
+                } else {
+                  std::cout << " normal:undefined binormal:undefined";
+                }
+              } else {
+                std::cout << " frenet:undefined";
+              }
+            } else {
+              std::cout << " frenet:unavailable";
+            }
+            std::cout << std::endl;
             handledVertex = true;
             break;
           }
