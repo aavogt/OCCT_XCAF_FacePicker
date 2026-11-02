@@ -93,8 +93,10 @@
 #include <XCAFPrs_AISObject.hxx>
 
 // Modeling & Structural Helpers
+#include <Bnd_Box.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepLProp_CLProps.hxx>
@@ -2153,6 +2155,9 @@ int main(int argc, char *argv[]) {
 
   double rotateStartX = 0.0;
   double rotateStartY = 0.0;
+  Standard_Real rotateCenterX = 0.0;
+  Standard_Real rotateCenterY = 0.0;
+  Standard_Real rotateCenterZ = 0.0;
   double panStartX = 0.0;
   double panStartY = 0.0;
 
@@ -2667,11 +2672,35 @@ int main(int argc, char *argv[]) {
       if (!wasRightPressed) {
         rotateStartX = mouseX;
         rotateStartY = mouseY;
+        view->At(rotateCenterX, rotateCenterY, rotateCenterZ);
+        Bnd_Box visibleBounds;
+        for (const LoadedStepModel &model : models) {
+          if (!model.visible) {
+            continue;
+          }
+          TopoDS_Shape visibleShape;
+          if (model.shapeTool->GetShape(model.rootLabel, visibleShape) &&
+              !visibleShape.IsNull()) {
+            BRepBndLib::Add(visibleShape, visibleBounds);
+          }
+        }
+        if (!visibleBounds.IsVoid() && !visibleBounds.IsOpen()) {
+          Standard_Real xMin = 0.0;
+          Standard_Real yMin = 0.0;
+          Standard_Real zMin = 0.0;
+          Standard_Real xMax = 0.0;
+          Standard_Real yMax = 0.0;
+          Standard_Real zMax = 0.0;
+          visibleBounds.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+          rotateCenterX = (xMin + xMax) * 0.5;
+          rotateCenterY = (yMin + yMax) * 0.5;
+          rotateCenterZ = (zMin + zMax) * 0.5;
+        }
       }
       const Standard_Real dx = (Standard_Real)(mouseX - rotateStartX);
       const Standard_Real dy = (Standard_Real)(mouseY - rotateStartY);
-      // Rotate(x,y,...)
-      view->Rotate(dx * 0.005, -dy * 0.005, 0.0,
+      view->Rotate(dx * 0.005, -dy * 0.005, 0.0, rotateCenterX,
+                   rotateCenterY, rotateCenterZ,
                    wasRightPressed ? Standard_False : Standard_True);
       dirty = true;
     }
