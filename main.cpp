@@ -929,7 +929,7 @@ bool FindFaceNormalAtPoint(const TopoDS_Face &face, const gp_Pnt &pickedPoint,
 bool FindEdgeFrenetFrame(const TopoDS_Edge &edge, const gp_Pnt &queryPoint,
                          gp_Pnt &closestPoint, gp_Dir &tangentOut,
                          gp_Dir &normalOut, gp_Dir &binormalOut,
-                         bool &hasNormalOut) {
+                         Standard_Real &curvatureOut, bool &hasNormalOut) {
   hasNormalOut = false;
   try {
     const BRepAdaptor_Curve curve(edge);
@@ -974,7 +974,8 @@ bool FindEdgeFrenetFrame(const TopoDS_Edge &edge, const gp_Pnt &queryPoint,
       tangentOut.Reverse();
     }
 
-    if (localProperties.Curvature() > Precision::Confusion()) {
+    curvatureOut = localProperties.Curvature();
+    if (curvatureOut > Precision::Confusion()) {
       try {
         localProperties.Normal(normalOut);
         binormalOut = tangentOut.Crossed(normalOut);
@@ -2865,11 +2866,17 @@ int main(int argc, char *argv[]) {
               gp_Dir normal;
               gp_Dir binormal;
               bool hasNormal = false;
+              Standard_Real curvature = 0.0;
               std::cout << " stab:" << stabbingPoint.X() << ','
                         << stabbingPoint.Y() << ',' << stabbingPoint.Z();
               if (FindEdgeFrenetFrame(pickedEdge, stabbingPoint, closestPoint,
-                                      tangent, normal, binormal, hasNormal)) {
-                std::cout << " closest:" << closestPoint.X() << ','
+                                      tangent, normal, binormal, curvature,
+                                      hasNormal)) {
+                std::cout << " radius:"
+                          << (curvature == 0.0
+                                  ? std::numeric_limits<Standard_Real>::infinity()
+                                  : 1.0 / curvature)
+                          << " closest:" << closestPoint.X() << ','
                           << closestPoint.Y() << ',' << closestPoint.Z()
                           << " tangent:" << tangent.X() << ',' << tangent.Y()
                           << ',' << tangent.Z();
