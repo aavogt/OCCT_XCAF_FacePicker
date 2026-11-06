@@ -28,7 +28,16 @@
 #include <sys/un.h>
 #include <unistd.h>
 #endif
+#include <png.h>
 
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <NCollection_Buffer.hxx>
+#include <Poly_Triangulation.hxx>
+#include <RWGltf_CafWriter.hxx>
+#include <TColStd_IndexedDataMapOfStringString.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFDoc_VisMaterialPBR.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
 #include <HeaderSection_FileDescription.hxx>
 #include <Interface_HArray1OfHAsciiString.hxx>
 #include <StepData_StepModel.hxx>
@@ -1280,9 +1289,8 @@ bool ParseCheckerboardLayer(const TCollection_ExtendedString &layerName,
   return true;
 }
 
-Handle(AIS_TexturedShape)
-    MakeCheckerboardPresentation(const TopoDS_Face &face,
-                                 const CheckerboardTree &tree) {
+Handle(Image_PixMap) MakeCheckerboardTexture(const TopoDS_Face &face,
+                                             const CheckerboardTree &tree) {
   const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
   if (surface.IsNull()) {
     return {};
@@ -1396,6 +1404,16 @@ Handle(AIS_TexturedShape)
     }
   }
 
+  return checkerTexture;
+}
+
+Handle(AIS_TexturedShape)
+    MakeCheckerboardPresentation(const TopoDS_Face &face,
+                                 const CheckerboardTree &tree) {
+  Handle(Image_PixMap) checkerTexture = MakeCheckerboardTexture(face, tree);
+  if (checkerTexture.IsNull()) {
+    return {};
+  }
   Handle(AIS_TexturedShape) presentation = new AIS_TexturedShape(face);
   presentation->SetPolygonOffsets(Aspect_POM_Fill, -1.0f, -1.0f);
   presentation->SetTexturePixMap(checkerTexture);
@@ -1404,9 +1422,215 @@ Handle(AIS_TexturedShape)
   presentation->DisableTextureModulate();
   return presentation;
 }
+
+Handle(Image_Texture) EncodeCheckerboardTexture(
+    const Handle(Image_PixMap) &pixmap, const std::string &textureId) {
+  if (pixmap.IsNull() || pixmap->Format() != Image_Format_RGBA) {
+    return {};
+  }
+
+  png_image image{};
+  image.version = PNG_IMAGE_VERSION;
+  image.width = static_cast<png_uint_32>(pixmap->Width());
+  image.height = static_cast<png_uint_32>(pixmap->Height());
+  image.format = PNG_FORMAT_RGBA;
+
+  const std::size_t rowSize = pixmap->Width() * 4;
+  std::vector<Standard_Byte> pixels(rowSize * pixmap->Height());
+  for (std::size_t y = 0; y < pixmap->Height(); ++y) {
+    std::memcpy(pixels.data() + y * rowSize, pixmap->Row(y), rowSize);
+  }
+
+  png_alloc_size_t encodedSize = 0;
+  if (!png_image_write_to_memory(&image, nullptr, &encodedSize, 0,
+                                 pixels.data(), 0, nullptr)) {
+    png_image_free(&image);
+    return {};
+  }
+  std::vector<Standard_Byte> encoded(encodedSize);
+  if (!png_image_write_to_memory(&image, encoded.data(), &encodedSize, 0,
+                                 pixels.data(), 0, nullptr)) {
+    png_image_free(&image);
+    return {};
+  }
+  png_image_free(&image);
+  encoded.resize(encodedSize);
+
+  Handle(NCollection_Buffer) buffer =
+      new NCollection_Buffer(Image_PixMap::DefaultAllocator(), encoded.size());
+  std::memcpy(buffer->ChangeData(), encoded.data(), encoded.size());
+  return new Image_Texture(buffer, TCollection_AsciiString(textureId.c_str()));
+}
+
+bool NormalizeFaceTextureUV(const TopoDS_Face &face) {
+  TopLoc_Location location;
+  Handle(Poly_Triangulation) triangulation =
+      BRep_Tool::Triangulation(face, location);
+  if (triangulation.IsNull() || !triangulation->HasUVNodes()) {
+    return false;
+  }
+
+  Standard_Real uMin = 0.0;
+  Standard_Real uMax = 0.0;
+  Standard_Real vMin = 0.0;
+  Standard_Real vMax = 0.0;
+  BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+  const Standard_Real uSpan = uMax - uMin;
+  const Standard_Real vSpan = vMax - vMin;
+  if (uSpan <= Precision::Confusion() || vSpan <= Precision::Confusion()) {
+    return false;
+  }
+
+  for (Standard_Integer i = 1; i <= triangulation->NbNodes(); ++i) {
+    const gp_Pnt2d uv = triangulation->UVNode(i);
+    triangulation->SetUVNode(
+        i, gp_Pnt2d((uv.X() - uMin) / uSpan, (uv.Y() - vMin) / vSpan));
+  }
+  return true;
+}
+
+bool ExportStepAsGlb(const Handle(TDocStd_Application) &app,
+                     const std::filesystem::path &stepPath) {
+  Handle(TDocStd_Document) document;
+  app->NewDocument("BinXCAF", document);
+
+  const std::string stepFilePath = stepPath.string();
+  STEPCAFControl_Reader reader;
+  reader.SetColorMode(Standard_True);
+  reader.SetNameMode(Standard_True);
+  reader.SetLayerMode(Standard_True);
+  if (reader.ReadFile(stepFilePath.c_str()) != IFSelect_RetDone ||
+      !reader.Transfer(document)) {
+    std::cerr << "Error: could not import STEP file " << stepFilePath
+              << std::endl;
+    app->Close(document);
+    return false;
+  }
+
+  Handle(XCAFDoc_ShapeTool) shapeTool =
+      XCAFDoc_DocumentTool::ShapeTool(document->Main());
+  Handle(XCAFDoc_LayerTool) layerTool =
+      XCAFDoc_DocumentTool::LayerTool(document->Main());
+  Handle(XCAFDoc_VisMaterialTool) materialTool =
+      XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+  TDF_LabelSequence freeShapes;
+  shapeTool->GetFreeShapes(freeShapes);
+  if (freeShapes.IsEmpty()) {
+    std::cerr << "Error: no free shapes in " << stepFilePath << std::endl;
+    app->Close(document);
+    return false;
+  }
+
+  for (Standard_Integer shapeIndex = 1; shapeIndex <= freeShapes.Length();
+       ++shapeIndex) {
+    const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(
+        freeShapes.Value(shapeIndex));
+    if (shape.IsNull()) {
+      continue;
+    }
+    BRepMesh_IncrementalMesh mesher(shape, 0.1, Standard_True, 0.5);
+  }
+
+  Standard_Integer textureIndex = 0;
+  for (Standard_Integer shapeIndex = 1; shapeIndex <= freeShapes.Length();
+       ++shapeIndex) {
+    const TDF_Label rootLabel = freeShapes.Value(shapeIndex);
+    const TopoDS_Shape rootShape = XCAFDoc_ShapeTool::GetShape(rootLabel);
+    for (TopExp_Explorer faceIt(rootShape, TopAbs_FACE); faceIt.More();
+         faceIt.Next()) {
+      const TopoDS_Face face = TopoDS::Face(faceIt.Current());
+      TDF_Label faceLabel;
+      if (!shapeTool->FindSubShape(rootLabel, face, faceLabel)) {
+        continue;
+      }
+
+      Handle(TColStd_HSequenceOfExtendedString) faceLayers =
+          layerTool->GetLayers(faceLabel);
+      CheckerboardTree tree;
+      bool hasCheckerboardColors = false;
+      if (!faceLayers.IsNull()) {
+        for (Standard_Integer i = faceLayers->Lower();
+             i <= faceLayers->Upper(); ++i) {
+          if (ParseCheckerboardLayer(faceLayers->Value(i), tree)) {
+            hasCheckerboardColors = true;
+            break;
+          }
+        }
+      }
+      if (!hasCheckerboardColors) {
+        continue;
+      }
+
+      Handle(Image_PixMap) pixmap = MakeCheckerboardTexture(face, tree);
+      if (pixmap.IsNull()) {
+        std::cerr << "Error: could not render marked checkerboard face in "
+                  << stepFilePath << std::endl;
+        app->Close(document);
+        return false;
+      }
+      if (!NormalizeFaceTextureUV(face)) {
+        std::cerr << "Error: checkerboard face has no usable UV triangulation in "
+                  << stepFilePath << std::endl;
+        app->Close(document);
+        return false;
+      }
+
+      const std::string textureId =
+          "checkerboard_" + std::to_string(textureIndex++) + ".png";
+      Handle(Image_Texture) texture =
+          EncodeCheckerboardTexture(pixmap, textureId);
+      if (texture.IsNull()) {
+        std::cerr << "Error: could not encode checkerboard texture for "
+                  << stepFilePath << std::endl;
+        app->Close(document);
+        return false;
+      }
+
+      XCAFDoc_VisMaterialPBR pbr;
+      pbr.IsDefined = Standard_True;
+      pbr.BaseColorTexture = texture;
+      pbr.BaseColor.SetRGB(
+          Quantity_Color(1.0, 1.0, 1.0, Quantity_TOC_RGB));
+      pbr.Metallic = 0.0f;
+      pbr.Roughness = 1.0f;
+      Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+      material->SetPbrMaterial(pbr);
+      const TDF_Label materialLabel = materialTool->AddMaterial(
+          material, TCollection_AsciiString(textureId.c_str()));
+      materialTool->SetShapeMaterial(faceLabel, materialLabel);
+    }
+  }
+
+  std::filesystem::path glbPath = stepPath;
+  glbPath.replace_extension(".glb");
+  RWGltf_CafWriter writer(TCollection_AsciiString(glbPath.string().c_str()),
+                          Standard_True);
+  writer.SetToEmbedTexturesInGlb(Standard_True);
+  TColStd_IndexedDataMapOfStringString metadata;
+  const bool exported =
+      writer.Perform(document, metadata, Message_ProgressRange());
+  if (!exported) {
+    std::cerr << "Error: failed to write GLB file " << glbPath << std::endl;
+  } else {
+    std::cout << "Wrote " << glbPath << std::endl;
+  }
+  app->Close(document);
+  return exported;
+}
 } // namespace
 
 int main(int argc, char *argv[]) {
+  bool exportGlb = false;
+  std::vector<char *> positionalArgs{argv[0]};
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--glb") == 0) {
+      exportGlb = true;
+    } else {
+      positionalArgs.push_back(argv[i]);
+    }
+  }
+  argc = static_cast<int>(positionalArgs.size());
+  argv = positionalArgs.data();
   bool wanthelp = (argc >= 2 && (strcmp(argv[1], "--help") == 0 ||
                                  strcmp(argv[1], "-h") == 0));
   if (wanthelp) {
@@ -1418,6 +1642,10 @@ int main(int argc, char *argv[]) {
     std::cout << "       " << argv[0] << " <camera_state>" << std::endl;
     std::cout << "       " << argv[0]
               << "                 (open and auto-reload all ./*.step files)"
+              << std::endl;
+    std::cout << "       " << argv[0]
+              << " --glb [path_to_step_file.stp] "
+                 "(write matching .glb files and exit)"
               << std::endl;
     std::cout << "\tHover a model to point `>` at its STEP file\n"
                  "\tClick a basename to toggle visibility; drag it >5px to "
@@ -1440,6 +1668,11 @@ int main(int argc, char *argv[]) {
               << std::endl;
     return 1;
   }
+  if (exportGlb && argc > 2) {
+    std::cerr << "Usage: " << argv[0] << " --glb [path_to_step_file.stp]"
+              << std::endl;
+    return 1;
+  }
 
 #ifndef _WIN32
   const std::filesystem::path socketPath =
@@ -1451,7 +1684,11 @@ int main(int argc, char *argv[]) {
   bool cameraStateOnly = false;
   std::string cliForwardQuery;
   std::string cliModelPath;
-  if (argc == 2 && ParseCameraState(argv[1], cameraState)) {
+  if (exportGlb) {
+    if (argc == 2) {
+      cliModelPath = argv[1];
+    }
+  } else if (argc == 2 && ParseCameraState(argv[1], cameraState)) {
     hasCameraState = true;
     cameraStateOnly = true;
   } else if (argc == 4) {
@@ -1577,6 +1814,16 @@ int main(int argc, char *argv[]) {
   // 1. Initialize an OCAF/XCAF Application Document Context
   Handle(TDocStd_Application) app = new TDocStd_Application();
   BinXCAFDrivers::DefineFormat(app); // Ensure data drivers are registered
+
+  if (exportGlb) {
+    bool allExportsSucceeded = true;
+    for (const std::filesystem::path &stepPath : stepPaths) {
+      if (!ExportStepAsGlb(app, stepPath)) {
+        allExportsSucceeded = false;
+      }
+    }
+    return allExportsSucceeded ? 0 : 1;
+  }
 
   // 2. Create a real GLFW/OpenGL window and bind OCCT view to it
   if (!glfwInit()) {

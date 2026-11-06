@@ -6,12 +6,24 @@ Like `f3d --watch` with forward and reverse searching of `.STEP` files created w
 ## installation
 
 ```
-apt install libglfw3-dev cmake 'libocct-*' occt-misc g++ # maybe more?
+apt install libglfw3-dev libpng-dev cmake 'libocct-*' occt-misc g++ # maybe more?
 wget https://gist.github.com/aavogt/73c26174af331e861b8dee574448bb00/raw/nvim-remote.sh
 cmake -Bbuild && cmake --build build
 # move build/OCCT_XCAF_FacePicker and nvim-remote.sh into your $PATH
 OCCT_XCAF_FacePicker model.step
 ```
+
+## GLB export
+
+```bash
+OCCT_XCAF_FacePicker --glb model.step
+OCCT_XCAF_FacePicker --glb # export all matching .step files in the current directory
+```
+
+Each input is written beside its STEP file with a `.glb` extension. This headless
+mode exports XCAF colors and names, plus embedded checkerboard textures for
+faces marked with checkerboard layer data. Texture UVs are normalized to each
+face's UV bounds, matching the viewer's per-face mapping.
 
 ## jump back
 

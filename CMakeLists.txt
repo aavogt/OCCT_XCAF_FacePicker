@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find dependencies
 find_package(OpenCASCADE REQUIRED)
+find_package(PNG REQUIRED)
 find_package(glfw3 REQUIRED)
 
 # Define the source files
@@ -24,6 +25,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 # - TKBinXCAF provides BinXCAFDrivers::DefineFormat()
 # - TKOpenGl provides OpenGl_GraphicDriver
 # - TKXDESTEP provides STEPCAFControl_Reader symbols for XCAF/STEP transfer
+# - TKDEGLTF provides RWGltf_CafWriter for binary glTF export
 target_link_libraries(${PROJECT_NAME} PRIVATE
     TKernel
     TKMath
@@ -37,5 +39,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     TKBinXCAF
     TKOpenGl
     TKDESTEP
+    PNG::PNG
+    TKDEGLTF
     glfw
 )
